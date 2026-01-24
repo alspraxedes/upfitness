@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+body {
+  background-color: #0f172a; /* Slate 950 */
+  color: #f1f5f9;            /* Slate 100 */
+}
+
+/* Ajuste para o scanner de QR Code não ficar estranho no fundo escuro */
+#reader {
+  border: none !important;
+  background: #1e293b;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+#reader__dashboard_section_csr button {
+  background-color: #ec4899 !important; /* Pink 500 */
+  color: white !important;
+  border: none !important;
+  padding: 8px 16px !important;
+  border-radius: 8px !important;
+  cursor: pointer;
+}
+
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type=number] {
+    -moz-appearance: textfield;
+  }
