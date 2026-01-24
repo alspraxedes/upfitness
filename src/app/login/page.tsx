@@ -11,10 +11,12 @@ export default function LoginPage() {
   const [senha, setSenha] = useState('');
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
+  const [sucessoMsg, setSucessoMsg] = useState<string | null>(null); // Novo estado para feedback
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setErro(null);
+    setSucessoMsg(null);
     setLoading(true);
 
     try {
@@ -28,25 +30,27 @@ export default function LoginPage() {
         if (error) throw error;
         router.replace('/');
       } else {
-        // PEGA A URL ATUAL (seja localhost ou seu dominio .uk)
-  const origin = window.location.origin;
+        // --- AJUSTE AQUI ---
+        const origin = window.location.origin;
+        
+        const { error, data } = await supabase.auth.signUp({
+          email: email.trim(),
+          password: senha,
+          options: {
+            emailRedirectTo: origin, // Força o link para a URL atual
+          },
+        });
+        
+        if (error) throw error;
 
-  const { error } = await supabase.auth.signUp({
-    email: email.trim(),
-    password: senha,
-    options: {
-      // Isso garante que o link no e-mail aponte para o site certo
-      emailRedirectTo: `${origin}`, 
-    },
-  });
-  
-  if (error) throw error;
-
-        // Dependendo da config do Supabase, pode exigir confirmação por e-mail.
-        // Se não exigir, já estará logado.
-        const { data } = await supabase.auth.getUser();
-        if (data?.user) router.replace('/');
-        else setErro('Conta criada. Verifique seu e-mail para confirmar e depois faça login.');
+        // Verifica se o usuário foi criado mas precisa confirmar (session é null)
+        if (data?.user && !data.session) {
+            setSucessoMsg('Conta criada! Verifique seu e-mail (inclusive SPAM) para confirmar o cadastro.');
+            setModo('login'); // Volta para tela de login
+        } else if (data?.session) {
+            // Se o "Confirm Email" estiver desligado no Supabase, ele entra direto
+            router.replace('/');
+        }
       }
     } catch (err: any) {
       setErro(err?.message ?? 'Erro ao autenticar.');
@@ -69,8 +73,14 @@ export default function LoginPage() {
             </p>
 
             {erro && (
-              <div className="mt-6 rounded-xl bg-slate-950/40 border border-red-900/40 p-4 text-sm text-red-200">
-                {erro}
+              <div className="mt-6 rounded-xl bg-red-950/40 border border-red-900/40 p-4 text-sm text-red-200 font-bold">
+                ⚠️ {erro}
+              </div>
+            )}
+
+            {sucessoMsg && (
+              <div className="mt-6 rounded-xl bg-green-950/40 border border-green-900/40 p-4 text-sm text-green-200 font-bold animate-pulse">
+                ✅ {sucessoMsg}
               </div>
             )}
 
@@ -110,28 +120,16 @@ export default function LoginPage() {
             <div className="mt-6 flex items-center justify-between text-xs">
               <button
                 type="button"
-                onClick={() => setModo(modo === 'login' ? 'signup' : 'login')}
-                className="text-slate-300 hover:text-white"
+                onClick={() => {
+                    setModo(modo === 'login' ? 'signup' : 'login');
+                    setErro(null);
+                    setSucessoMsg(null);
+                }}
+                className="text-slate-300 hover:text-white underline decoration-slate-700"
               >
                 {modo === 'login' ? 'Não tenho conta → criar' : 'Já tenho conta → entrar'}
               </button>
-
-              <button
-                type="button"
-                onClick={async () => {
-                  await supabase.auth.signOut();
-                  setErro('Sessão encerrada.');
-                }}
-                className="text-slate-500 hover:text-slate-300"
-                title="Útil para limpar sessão"
-              >
-                Sair
-              </button>
             </div>
-
-            <p className="mt-6 text-[11px] text-slate-500">
-              Se você habilitou confirmação por e-mail no Supabase Auth, a criação de conta pode exigir confirmação antes do login.
-            </p>
           </div>
         </div>
       </div>
