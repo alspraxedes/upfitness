@@ -28,11 +28,19 @@ export default function LoginPage() {
         if (error) throw error;
         router.replace('/');
       } else {
-        const { error } = await supabase.auth.signUp({
-          email: email.trim(),
-          password: senha,
-        });
-        if (error) throw error;
+        // PEGA A URL ATUAL (seja localhost ou seu dominio .uk)
+  const origin = window.location.origin;
+
+  const { error } = await supabase.auth.signUp({
+    email: email.trim(),
+    password: senha,
+    options: {
+      // Isso garante que o link no e-mail aponte para o site certo
+      emailRedirectTo: `${origin}`, 
+    },
+  });
+  
+  if (error) throw error;
 
         // Dependendo da config do Supabase, pode exigir confirmação por e-mail.
         // Se não exigir, já estará logado.
