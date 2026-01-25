@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
-import { Html5Qrcode } from 'html5-qrcode'; // Mudamos para o Motor Puro (Igual ao Cadastro)
+import { Html5Qrcode } from 'html5-qrcode'; // Mudamos para o Motor Puro (Turbo)
 
 // --- UTILITÁRIOS ---
 function formatBRL(v: any) {
@@ -52,7 +52,7 @@ export default function Dashboard() {
 
   // Controle
   const dataFetchedRef = useRef(false);
-  const scannerRef = useRef<Html5Qrcode | null>(null); // Referência para controle da câmera
+  const scannerRef = useRef<Html5Qrcode | null>(null);
 
   // 1. INICIALIZAÇÃO
   useEffect(() => {
@@ -125,43 +125,48 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [produtos]); 
 
-  // --- 4. SCANNER TURBO (Igual ao Cadastro) ---
+  // --- 4. SCANNER TURBO (Motor Direto) ---
   useEffect(() => {
     if (mostrarScanner) {
         const elementId = "reader-dashboard-direct";
         const t = setTimeout(() => {
             if (!document.getElementById(elementId)) return;
 
-            // Instancia Motor Puro
+            // Instancia o motor puro (Sem UI padrão)
             const html5QrCode = new Html5Qrcode(elementId);
             scannerRef.current = html5QrCode;
 
+            const config = { 
+                fps: 30, // 30 Frames por segundo (Foco mais rápido)
+                qrbox: { width: 250, height: 100 }, // Área retangular
+                aspectRatio: 1.0 
+            };
+
+            // Inicia direto na câmera traseira
             html5QrCode.start(
-                { facingMode: "environment" }, // Câmera Traseira Direta
-                { 
-                    fps: 30, 
-                    qrbox: { width: 250, height: 100 }, // Área Retangular
-                    aspectRatio: 1.0 
-                },
+                { facingMode: "environment" }, 
+                config,
                 (decodedText) => {
                     playBeep();
-                    console.log("Lido:", decodedText);
                     setBusca(decodedText); 
                     fecharScanner();
                 },
                 (errorMessage) => { 
-                    // Ignora erros de frame vazio para não sujar o console
+                    // Ignora erros de frame vazio
                 }
             ).catch(err => {
                 console.error("Erro ao iniciar câmera:", err);
+                alert("Erro ao abrir câmera. Verifique as permissões.");
                 setMostrarScanner(false);
             });
-        }, 300);
+
+        }, 300); // Delay pequeno para garantir renderização do modal
+
         return () => clearTimeout(t);
     }
   }, [mostrarScanner]);
 
-  // Função para fechar corretamente
+  // Função segura para fechar o scanner
   const fecharScanner = async () => {
       if (scannerRef.current) {
           try {
@@ -188,6 +193,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
       
+      {/* HEADER */}
       <header className="bg-gradient-to-r from-pink-600 to-blue-600 p-4 md:p-6 shadow-2xl mb-6 flex flex-col md:flex-row justify-between items-center sticky top-0 z-50 gap-4 transition-all">
         <div className="flex flex-col items-center md:items-start w-full md:w-auto">
             <h1 className="font-black italic text-xl tracking-tighter text-center md:text-left">
@@ -210,6 +216,7 @@ export default function Dashboard() {
 
       <main className="max-w-7xl mx-auto px-4 pb-24">
         
+        {/* BUSCA + BOTÃO CÂMERA */}
         <div className="flex gap-2 mb-8 relative z-40">
             <div className="relative flex-1 group">
                 <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
@@ -231,6 +238,7 @@ export default function Dashboard() {
             </button>
         </div>
 
+        {/* LOADING */}
         {loading ? (
           <div className="flex flex-col items-center justify-center py-20 gap-4 opacity-50 animate-pulse">
             <div className="w-12 h-12 border-4 border-pink-500 border-t-transparent rounded-full animate-spin"></div>
@@ -242,12 +250,16 @@ export default function Dashboard() {
              <p className="font-bold text-sm">Nenhum produto encontrado.</p>
           </div>
         ) : (
+          /* GRID DE PRODUTOS */
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
             {filtrados.map((produto) => {
               const cores = produto.produto_cores ?? [];
               const pathFotoPrincipal = cores.find((c: any) => c.foto_url)?.foto_url;
               const urlAssinada = pathFotoPrincipal ? signedMap[pathFotoPrincipal] : null;
-              const totalPeca = cores.reduce((acc: number, curr: any) => acc + (curr.estoque?.reduce((a: number, b: any) => a + (b.quantidade||0), 0) || 0), 0);
+
+              const totalPeca = cores.reduce((acc: number, curr: any) => 
+                acc + (curr.estoque?.reduce((a: number, b: any) => a + (b.quantidade||0), 0) || 0), 0
+              );
 
               return (
                 <Link
@@ -307,6 +319,7 @@ export default function Dashboard() {
                                 </div>
                             );
                         })}
+                        {cores.length > 2 && <p className="text-[8px] text-slate-600 italic pl-4">+ {cores.length - 2} cores...</p>}
                     </div>
 
                     <div className="mt-1 pt-1 border-t border-slate-800 flex justify-end">
@@ -322,12 +335,13 @@ export default function Dashboard() {
         )}
       </main>
 
+      {/* MODAL SCANNER TURBO (NOVO) */}
       {mostrarScanner && (
             <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-6 backdrop-blur-md">
                 <div className="w-full max-w-sm bg-slate-900 p-6 rounded-3xl border border-slate-800 shadow-2xl relative">
-                    <h3 className="text-center font-black uppercase text-white mb-4 text-sm">BUSCAR PRODUTO</h3>
+                    <h3 className="text-center font-black uppercase text-white mb-4 text-sm">Aponte para o Código</h3>
                     <div id="reader-dashboard-direct" className="w-full rounded-2xl overflow-hidden border-2 border-pink-500 bg-black h-64"></div>
-                    <p className="text-center text-[10px] text-slate-500 mt-2">Aponte para o código de barras.</p>
+                    <p className="text-center text-[10px] text-slate-500 mt-2">A câmera traseira será usada automaticamente.</p>
                     <button onClick={fecharScanner} className="mt-4 w-full bg-slate-800 text-white py-4 rounded-xl font-bold uppercase tracking-widest text-xs active:scale-95">Fechar</button>
                 </div>
             </div>
