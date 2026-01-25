@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
-import { Html5Qrcode } from 'html5-qrcode'; // Mudamos para o Motor Puro (Turbo)
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode'; // Motor Puro (Turbo)
 
 // --- UTILITÁRIOS ---
 function formatBRL(v: any) {
@@ -125,26 +125,38 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [produtos]); 
 
-  // --- 4. SCANNER TURBO (Motor Direto) ---
+  // --- 4. SCANNER TURBO V2 (Foco Melhorado) ---
   useEffect(() => {
     if (mostrarScanner) {
         const elementId = "reader-dashboard-direct";
         const t = setTimeout(() => {
             if (!document.getElementById(elementId)) return;
 
-            // Instancia o motor puro (Sem UI padrão)
             const html5QrCode = new Html5Qrcode(elementId);
             scannerRef.current = html5QrCode;
 
-            const config = { 
-                fps: 30, // 30 Frames por segundo (Foco mais rápido)
-                qrbox: { width: 250, height: 100 }, // Área retangular
-                aspectRatio: 1.0 
+            // --- CONFIGURAÇÃO DE CÂMERA AVANÇADA ---
+            // Tenta forçar o modo de foco contínuo e alta resolução
+            const videoConstraints = {
+                facingMode: "environment",
+                focusMode: "continuous", // TENTATIVA DE FORÇAR FOCO
+                width: { ideal: 1920 },  // Resolução maior ajuda no foco
+                height: { ideal: 1080 }
             };
 
-            // Inicia direto na câmera traseira
+            const config = { 
+                fps: 30, 
+                qrbox: { width: 280, height: 150 }, // Área de leitura um pouco maior
+                aspectRatio: 1.0,
+                formatsToSupport: [ 
+                    Html5QrcodeSupportedFormats.EAN_13, 
+                    Html5QrcodeSupportedFormats.EAN_8, 
+                    Html5QrcodeSupportedFormats.CODE_128
+                ]
+            };
+
             html5QrCode.start(
-                { facingMode: "environment" }, 
+                videoConstraints, // Usa as restrições avançadas
                 config,
                 (decodedText) => {
                     playBeep();
@@ -152,16 +164,15 @@ export default function Dashboard() {
                     fecharScanner();
                 },
                 (errorMessage) => { 
-                    // Ignora erros de frame vazio
+                    // Ignora erros de frame
                 }
             ).catch(err => {
                 console.error("Erro ao iniciar câmera:", err);
-                alert("Erro ao abrir câmera. Verifique as permissões.");
+                alert("Erro ao abrir câmera. Tente aproximar/afastar.");
                 setMostrarScanner(false);
             });
 
-        }, 300); // Delay pequeno para garantir renderização do modal
-
+        }, 300);
         return () => clearTimeout(t);
     }
   }, [mostrarScanner]);
@@ -335,13 +346,13 @@ export default function Dashboard() {
         )}
       </main>
 
-      {/* MODAL SCANNER TURBO (NOVO) */}
+      {/* MODAL SCANNER TURBO V2 */}
       {mostrarScanner && (
             <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-6 backdrop-blur-md">
                 <div className="w-full max-w-sm bg-slate-900 p-6 rounded-3xl border border-slate-800 shadow-2xl relative">
                     <h3 className="text-center font-black uppercase text-white mb-4 text-sm">Aponte para o Código</h3>
                     <div id="reader-dashboard-direct" className="w-full rounded-2xl overflow-hidden border-2 border-pink-500 bg-black h-64"></div>
-                    <p className="text-center text-[10px] text-slate-500 mt-2">A câmera traseira será usada automaticamente.</p>
+                    <p className="text-center text-[10px] text-slate-500 mt-2">A câmera traseira será usada automaticamente.<br/>Tente aproximar ou afastar se o foco demorar.</p>
                     <button onClick={fecharScanner} className="mt-4 w-full bg-slate-800 text-white py-4 rounded-xl font-bold uppercase tracking-widest text-xs active:scale-95">Fechar</button>
                 </div>
             </div>
