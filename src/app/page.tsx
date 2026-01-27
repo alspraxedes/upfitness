@@ -4,19 +4,12 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
-import { Html5Qrcode } from 'html5-qrcode'; // Motor Direto
+import { Html5Qrcode } from 'html5-qrcode';
 
 // --- UTILITÁRIOS ---
 function formatBRL(v: any) {
   const n = typeof v === 'number' ? v : Number(v);
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number.isFinite(n) ? n : 0);
-}
-
-function getTamanhoNome(item: any) {
-    const t = item.tamanho;
-    if (!t) return '?';
-    if (Array.isArray(t)) return t[0]?.nome ?? '?';
-    return t.nome ?? '?';
 }
 
 function extractPath(url: string | null) {
@@ -76,25 +69,29 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2. BUSCA
+  // 2. BUSCA (Nova Query Otimizada)
   async function fetchProdutos() {
     setLoading(true);
     try {
         const { data, error } = await supabase
           .from('produtos')
           .select(`
-              id, codigo_peca, descricao, preco_venda, created_at,
-              produto_cores (
-                id, foto_url,
-                cor:cores ( nome ),
-                estoque ( quantidade, codigo_barras, tamanho:tamanhos ( nome ) )
-              )
+              id, codigo_peca, sku_fornecedor, descricao, cor, foto_url, preco_venda, created_at,
+              estoque ( quantidade, codigo_barras, tamanho:tamanhos ( nome, ordem ) )
             `)
+          .eq('descontinuado', false) // Opcional: só mostra ativos
           .order('created_at', { ascending: false })
           .limit(100);
 
         if (error) throw error;
-        setProdutos(data || []);
+        
+        // Ordenar estoque por tamanho (P, M, G...)
+        const produtosOrdenados = data?.map(p => ({
+            ...p,
+            estoque: p.estoque?.sort((a: any, b: any) => (a.tamanho?.ordem ?? 99) - (b.tamanho?.ordem ?? 99))
+        }));
+
+        setProdutos(produtosOrdenados || []);
     } catch (err) {
         console.error('Erro produtos:', err);
     } finally {
@@ -102,15 +99,16 @@ export default function Dashboard() {
     }
   }
 
-  // 3. IMAGENS
+  // 3. IMAGENS (Simplificado)
   useEffect(() => {
     if (produtos.length === 0) return;
     const carregarImagens = async () => {
       const paths = new Set<string>();
-      produtos.forEach(p => p.produto_cores?.forEach((pc: any) => {
-          if (pc.foto_url && !signedMap[pc.foto_url]) paths.add(pc.foto_url);
-      }));
+      produtos.forEach(p => {
+          if (p.foto_url && !signedMap[p.foto_url]) paths.add(p.foto_url);
+      });
       if (paths.size === 0) return;
+      
       const updates: Record<string, string> = {};
       await Promise.allSettled(Array.from(paths).map(async (url) => {
           const path = extractPath(url);
@@ -125,79 +123,63 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [produtos]); 
 
-  // --- 4. SCANNER TURBO (Modo Compatível) ---
+  // --- 4. SCANNER TURBO ---
   useEffect(() => {
     if (mostrarScanner) {
         const elementId = "reader-dashboard-direct";
         const t = setTimeout(() => {
             if (!document.getElementById(elementId)) return;
-
             const html5QrCode = new Html5Qrcode(elementId);
             scannerRef.current = html5QrCode;
-
-            // CONFIGURAÇÃO SEGURA: Deixamos o navegador escolher a melhor resolução
-            const config = { 
-                fps: 25, 
-                qrbox: { width: 250, height: 150 }, // Retangular para código de barras
-                aspectRatio: 1.0 
-            };
-
             html5QrCode.start(
-                { facingMode: "environment" }, // Apenas pede câmera traseira
-                config,
+                { facingMode: "environment" },
+                { fps: 25, qrbox: { width: 250, height: 150 }, aspectRatio: 1.0 },
                 (decodedText) => {
                     playBeep();
                     setBusca(decodedText); 
                     fecharScanner();
                 },
-                (errorMessage) => { 
-                    // Ignora erros de frame vazio
-                }
+                (errorMessage) => {}
             ).catch(err => {
-                console.error("Erro ao iniciar câmera:", err);
-                alert("Não foi possível acessar a câmera. Verifique as permissões.");
+                console.error("Erro câmera:", err);
                 setMostrarScanner(false);
             });
-
         }, 300);
-
         return () => clearTimeout(t);
     }
   }, [mostrarScanner]);
 
   const fecharScanner = async () => {
       if (scannerRef.current) {
-          try {
-            if (scannerRef.current.isScanning) {
-                await scannerRef.current.stop();
-            }
-            scannerRef.current.clear();
-          } catch (e) { console.log(e); }
+          try { if (scannerRef.current.isScanning) await scannerRef.current.stop(); scannerRef.current.clear(); } catch (e) {}
       }
       setMostrarScanner(false);
   };
 
+  // Filtro Inteligente (Nome, Código, SKU Fornecedor, EAN)
   const filtrados = useMemo(() => {
     const q = busca.trim().toLowerCase();
     if (!q) return produtos;
     return produtos.filter(p => {
       const d = (p.descricao||'').toLowerCase();
       const c = (p.codigo_peca||'').toLowerCase();
-      const ean = p.produto_cores?.some((pc: any) => pc.estoque?.some((e: any) => e.codigo_barras?.toLowerCase().includes(q)));
-      return d.includes(q) || c.includes(q) || ean;
+      const sku = (p.sku_fornecedor||'').toLowerCase();
+      const cor = (p.cor||'').toLowerCase();
+      const ean = p.estoque?.some((e: any) => e.codigo_barras?.toLowerCase().includes(q));
+      return d.includes(q) || c.includes(q) || sku.includes(q) || cor.includes(q) || ean;
     });
   }, [busca, produtos]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
       
+      {/* HEADER */}
       <header className="bg-gradient-to-r from-pink-600 to-blue-600 p-4 md:p-6 shadow-2xl mb-6 flex flex-col md:flex-row justify-between items-center sticky top-0 z-50 gap-4 transition-all">
         <div className="flex flex-col items-center md:items-start w-full md:w-auto">
             <h1 className="font-black italic text-xl tracking-tighter text-center md:text-left">
-            UPFITNESS <span className="font-light tracking-normal text-white/80">DASHBOARD</span>
+            UPFITNESS <span className="font-light tracking-normal text-white/80">Estoque</span>
             </h1>
         </div>
-
         <div className="grid grid-cols-3 gap-2 w-full md:w-auto md:flex">
           <Link href="/cadastro" className="bg-white text-pink-600 py-3 md:py-2 px-3 md:px-5 rounded-xl md:rounded-full text-[10px] font-black hover:scale-105 active:scale-95 transition-transform shadow-xl uppercase tracking-widest flex items-center justify-center text-center">
             + NOVO
@@ -213,6 +195,7 @@ export default function Dashboard() {
 
       <main className="max-w-7xl mx-auto px-4 pb-24">
         
+        {/* BARRA DE BUSCA */}
         <div className="flex gap-2 mb-8 relative z-40">
             <div className="relative flex-1 group">
                 <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
@@ -220,7 +203,7 @@ export default function Dashboard() {
                 </div>
                 <input
                     type="text"
-                    placeholder="Buscar nome, código ou EAN..."
+                    placeholder="Buscar nome, código, SKU..."
                     className="w-full pl-12 pr-4 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:border-pink-500 outline-none shadow-xl transition-all font-bold text-base md:text-sm group-hover:bg-slate-800"
                     value={busca}
                     onChange={(e) => setBusca(e.target.value)}
@@ -247,13 +230,8 @@ export default function Dashboard() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
             {filtrados.map((produto) => {
-              const cores = produto.produto_cores ?? [];
-              const pathFotoPrincipal = cores.find((c: any) => c.foto_url)?.foto_url;
-              const urlAssinada = pathFotoPrincipal ? signedMap[pathFotoPrincipal] : null;
-
-              const totalPeca = cores.reduce((acc: number, curr: any) => 
-                acc + (curr.estoque?.reduce((a: number, b: any) => a + (b.quantidade||0), 0) || 0), 0
-              );
+              const urlAssinada = produto.foto_url ? signedMap[produto.foto_url] : null;
+              const totalPeca = produto.estoque?.reduce((acc: number, item: any) => acc + (item.quantidade || 0), 0) || 0;
 
               return (
                 <Link
@@ -261,20 +239,23 @@ export default function Dashboard() {
                   key={produto.id}
                   className="bg-slate-900 rounded-2xl overflow-hidden border border-slate-800 shadow-lg hover:shadow-2xl hover:border-pink-500/30 active:scale-[0.98] transition-all flex flex-row h-auto min-h-[120px] group cursor-pointer"
                 >
-                  <div className="w-24 bg-slate-950 relative flex-shrink-0 border-r border-slate-800">
+                  {/* FOTO E CÓDIGO */}
+                  <div className="w-28 bg-slate-950 relative flex-shrink-0 border-r border-slate-800">
                     {urlAssinada ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={urlAssinada} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" alt="Foto" loading="lazy" />
                     ) : (
                       <div className="w-full h-full flex flex-col items-center justify-center text-slate-700 bg-slate-950/50">
-                        {pathFotoPrincipal ? <div className="w-5 h-5 border-2 border-slate-600 border-t-transparent rounded-full animate-spin"></div> : <span className="text-2xl opacity-30">📷</span>}
+                        <span className="text-2xl opacity-30">📷</span>
                       </div>
                     )}
                     <div className="absolute bottom-0 left-0 right-0 bg-black/80 backdrop-blur-sm p-1 text-center">
                         <span className="text-[9px] font-black text-white tracking-widest font-mono block truncate">{produto.codigo_peca}</span>
+                        {produto.sku_fornecedor && <span className="text-[8px] font-bold text-slate-400 font-mono block truncate">{produto.sku_fornecedor}</span>}
                     </div>
                   </div>
 
+                  {/* DADOS */}
                   <div className="flex-1 p-3 flex flex-col justify-between min-w-0">
                     <div className="flex justify-between items-start gap-2">
                         <h2 className="font-bold text-slate-200 text-xs leading-tight uppercase line-clamp-2">
@@ -285,37 +266,28 @@ export default function Dashboard() {
                         </span>
                     </div>
 
-                    <div className="space-y-1.5 mt-2 flex-1">
-                        {cores.slice(0, 2).map((pc: any) => {
-                            const estoque = pc.estoque || [];
-                            if (estoque.length === 0) return null;
-                            const urlCor = pc.foto_url ? signedMap[pc.foto_url] : null;
-
-                            return (
-                                <div key={pc.id} className="flex items-center gap-2">
-                                    <div className="w-2 h-2 rounded-full bg-pink-500 overflow-hidden border border-white/20 shrink-0">
-                                        {urlCor && (
-                                            // eslint-disable-next-line @next/next/no-img-element
-                                            <img src={urlCor} className="w-full h-full object-cover" alt="" />
-                                        )}
-                                    </div>
-                                    <div className="flex flex-wrap gap-1">
-                                        {estoque.map((item: any, i: number) => (
-                                            <span key={i} className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${
-                                                (item.quantidade||0) > 0 
-                                                ? 'bg-slate-800 border-slate-700 text-slate-300' 
-                                                : 'bg-red-950/20 border-red-900/30 text-red-500 opacity-50'
-                                            }`}>
-                                                {getTamanhoNome(item)} <span className="text-white/50">x{item.quantidade}</span>
-                                            </span>
-                                        ))}
-                                    </div>
-                                </div>
-                            );
-                        })}
+                    <div className="mt-1 mb-2">
+                        <span className="text-[10px] font-bold text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full inline-block">
+                           Cor: <span className="text-white">{produto.cor || '?'}</span>
+                        </span>
                     </div>
 
-                    <div className="mt-1 pt-1 border-t border-slate-800 flex justify-end">
+                    <div className="flex-1 flex flex-wrap content-start gap-1">
+                        {produto.estoque?.map((item: any, i: number) => (
+                            <span key={i} className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${
+                                (item.quantidade||0) > 0 
+                                ? 'bg-slate-800 border-slate-700 text-slate-300' 
+                                : 'bg-red-950/20 border-red-900/30 text-red-500 opacity-50'
+                            }`}>
+                                {item.tamanho?.nome} <span className="text-white/50">x{item.quantidade}</span>
+                            </span>
+                        ))}
+                    </div>
+
+                    <div className="mt-2 pt-1 border-t border-slate-800 flex justify-between items-center">
+                         <span className="text-[8px] font-bold text-slate-500">
+                             {produto.sku_fornecedor ? 'SKU: ' + produto.sku_fornecedor : ''}
+                         </span>
                         <span className={`text-[9px] font-black ${totalPeca > 0 ? 'text-slate-400' : 'text-red-500'}`}>
                             Total: <span className="text-white">{totalPeca} un</span>
                         </span>
@@ -328,13 +300,12 @@ export default function Dashboard() {
         )}
       </main>
 
-      {/* MODAL SCANNER TURBO (V14.0) */}
+      {/* MODAL SCANNER */}
       {mostrarScanner && (
             <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-6 backdrop-blur-md">
                 <div className="w-full max-w-sm bg-slate-900 p-6 rounded-3xl border border-slate-800 shadow-2xl relative">
                     <h3 className="text-center font-black uppercase text-white mb-4 text-sm">Aponte para o Código</h3>
                     <div id="reader-dashboard-direct" className="w-full rounded-2xl overflow-hidden border-2 border-pink-500 bg-black h-64"></div>
-                    <p className="text-center text-[10px] text-slate-500 mt-2">Aproxime o código da câmera.</p>
                     <button onClick={fecharScanner} className="mt-4 w-full bg-slate-800 text-white py-4 rounded-xl font-bold uppercase tracking-widest text-xs active:scale-95">Fechar</button>
                 </div>
             </div>

@@ -2,6 +2,7 @@ import './globals.css';
 
 export const metadata = {
   title: 'UpFitness - Controle de Estoque',
+  manifest: "/manifest.json",
 };
 
 export default function RootLayout({

@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { supabase } from '../../lib/supabase';
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import { Html5Qrcode } from 'html5-qrcode';
 import Cropper from 'react-easy-crop';
 
 // --- TIPOS ---
@@ -14,30 +14,27 @@ type EstoqueItem = {
   tamanho: { nome: string; ordem: number }; 
 };
 
-type ProdutoCor = {
-  id: string;
-  foto_url: string | null;
-  cor: { nome: string };
-  estoque: EstoqueItem[];
-};
-
 type Produto = {
   id: string;
   codigo_peca: string;
+  sku_fornecedor: string | null;
   descricao: string;
+  cor: string | null;
+  foto_url: string | null;
   preco_venda: number;
   preco_compra?: number;
   custo_frete?: number;
   custo_embalagem?: number;
-  produto_cores: ProdutoCor[];
+  estoque: EstoqueItem[]; // Agora direto no produto
 };
 
 type ItemCarrinho = {
   tempId: string;
   produto_id: string;
-  produto_cor_id: string;
   estoque_id: string;
   descricao: string;
+  cor: string;
+  tamanho: string;
   preco: number;
   custo: number;
   qtd: number;
@@ -62,11 +59,7 @@ const playBeep = () => {
 };
 
 const ordenarEstoque = (estoque: EstoqueItem[]) => {
-    return [...estoque].sort((a, b) => {
-        const ordemA = a.tamanho.ordem ?? 999;
-        const ordemB = b.tamanho.ordem ?? 999;
-        return ordemA - ordemB;
-    });
+    return [...estoque].sort((a, b) => (a.tamanho?.ordem ?? 999) - (b.tamanho?.ordem ?? 999));
 };
 
 function extractPath(url: string | null) {
@@ -101,11 +94,11 @@ export default function VendaPage() {
   const [abaMobile, setAbaMobile] = useState<'busca' | 'carrinho'>('busca');
   const [carrinho, setCarrinho] = useState<ItemCarrinho[]>([]);
   
-  // Modais de Fluxo
+  // Modais
   const [modalSelecao, setModalSelecao] = useState<Produto | null>(null);
   const [mostrarScanner, setMostrarScanner] = useState(false);
   const [modalPagamento, setModalPagamento] = useState(false);
-  const [itemPendente, setItemPendente] = useState<{ produto: Produto, pc: ProdutoCor, est: EstoqueItem } | null>(null);
+  const [itemPendente, setItemPendente] = useState<{ produto: Produto, est: EstoqueItem } | null>(null);
 
   const [pagamento, setPagamento] = useState({
       metodo: 'pix', 
@@ -125,17 +118,14 @@ export default function VendaPage() {
 
   useEffect(() => { fetchProdutos(); }, []);
 
-  // Assinatura de Fotos
+  // Assinatura de Fotos (Simplificado)
   useEffect(() => {
     (async () => {
         const pathsToSign = new Set<string>();
         carrinho.forEach(item => { if (item.foto && !signedMap[item.foto]) pathsToSign.add(item.foto); });
-        if (modalSelecao) {
-            modalSelecao.produto_cores.forEach(pc => { if (pc.foto_url && !signedMap[pc.foto_url]) pathsToSign.add(pc.foto_url); });
-        }
-        if (itemPendente && itemPendente.pc.foto_url && !signedMap[itemPendente.pc.foto_url]) {
-            pathsToSign.add(itemPendente.pc.foto_url);
-        }
+        
+        if (modalSelecao?.foto_url && !signedMap[modalSelecao.foto_url]) pathsToSign.add(modalSelecao.foto_url);
+        if (itemPendente?.produto.foto_url && !signedMap[itemPendente.produto.foto_url]) pathsToSign.add(itemPendente.produto.foto_url);
 
         if (pathsToSign.size === 0) return;
 
@@ -168,10 +158,8 @@ export default function VendaPage() {
         const elementId = "reader-venda-direct";
         const t = setTimeout(() => {
             if (!document.getElementById(elementId)) return;
-
             const html5QrCode = new Html5Qrcode(elementId);
             scannerRef.current = html5QrCode;
-
             html5QrCode.start(
                 { facingMode: "environment" },
                 { fps: 30, qrbox: { width: 250, height: 100 }, aspectRatio: 1.0 },
@@ -182,7 +170,6 @@ export default function VendaPage() {
                 (error) => { }
             ).catch(err => {
                 console.error("Erro Câmera:", err);
-                alert("Erro ao abrir câmera.");
                 setMostrarScanner(false);
             });
         }, 300);
@@ -204,13 +191,9 @@ export default function VendaPage() {
     const { data } = await supabase
       .from('produtos')
       .select(`
-        id, codigo_peca, descricao, preco_venda, 
+        id, codigo_peca, sku_fornecedor, descricao, cor, foto_url, preco_venda, 
         preco_compra, custo_frete, custo_embalagem,
-        produto_cores (
-          id, foto_url,
-          cor:cores(nome),
-          estoque(id, quantidade, codigo_barras, tamanho:tamanhos(nome, ordem))
-        )
+        estoque ( id, quantidade, codigo_barras, tamanho:tamanhos(nome, ordem) )
       `)
       .eq('descontinuado', false); 
     if (data) setProdutos(data as any);
@@ -220,12 +203,10 @@ export default function VendaPage() {
       const codigoLimpo = codigo.trim();
       if (!codigoLimpo) return false;
       for (const p of produtos) {
-          for (const pc of p.produto_cores) {
-              const estoqueEncontrado = pc.estoque.find(e => e.codigo_barras === codigoLimpo);
-              if (estoqueEncontrado) {
-                  prepararAdicao(p, pc, estoqueEncontrado); 
-                  return true;
-              }
+          const estoqueEncontrado = p.estoque.find(e => e.codigo_barras === codigoLimpo);
+          if (estoqueEncontrado) {
+              prepararAdicao(p, estoqueEncontrado); 
+              return true;
           }
       }
       return false;
@@ -237,17 +218,17 @@ export default function VendaPage() {
       else setImgSrc(null);
   }
 
-  // --- NOVA LÓGICA DE ADIÇÃO (CONFERÊNCIA) ---
-  function prepararAdicao(produto: Produto, pc: ProdutoCor, est: EstoqueItem) {
+  // --- NOVA LÓGICA DE ADIÇÃO ---
+  function prepararAdicao(produto: Produto, est: EstoqueItem) {
       playBeep();
-      setItemPendente({ produto, pc, est });
+      setItemPendente({ produto, est });
       setModalSelecao(null);
       setBusca('');
   }
 
   function confirmarAdicao() {
     if (!itemPendente) return;
-    const { produto, pc, est } = itemPendente;
+    const { produto, est } = itemPendente;
 
     const jaNoCarrinho = carrinho.find(item => item.estoque_id === est.id);
     const qtdNoCarrinho = jaNoCarrinho ? jaNoCarrinho.qtd : 0;
@@ -265,14 +246,15 @@ export default function VendaPage() {
       const novoItem: ItemCarrinho = {
         tempId: Math.random().toString(36),
         produto_id: produto.id,
-        produto_cor_id: pc.id,
         estoque_id: est.id,
         descricao: produto.descricao,
+        cor: produto.cor || '',
+        tamanho: est.tamanho.nome,
         preco: produto.preco_venda,
         custo: custoTotalItem,
         qtd: 1,
         maxEstoque: est.quantidade,
-        foto: pc.foto_url,
+        foto: produto.foto_url,
         ean: est.codigo_barras
       };
       setCarrinho(prev => [...prev, novoItem]);
@@ -320,11 +302,16 @@ export default function VendaPage() {
     const q = busca.toLowerCase().trim();
     if (!q) return [];
     return produtos.filter(p => {
-        const matchTexto = (p.descricao||'').toLowerCase().includes(q) || (p.codigo_peca||'').toLowerCase().includes(q);
-        const matchEan = p.produto_cores.some(pc => pc.estoque.some(e => e.codigo_barras?.includes(q)));
+        const matchTexto = (p.descricao||'').toLowerCase().includes(q) 
+            || (p.codigo_peca||'').toLowerCase().includes(q) 
+            || (p.sku_fornecedor||'').toLowerCase().includes(q);
+        
+        const matchEan = p.estoque.some(e => e.codigo_barras?.includes(q));
         if (!matchTexto && !matchEan) return false;
-        const estoqueTotal = p.produto_cores.reduce((accCor, pc) => accCor + pc.estoque.reduce((accEst, est) => accEst + est.quantidade, 0), 0);
-        return estoqueTotal > 0;
+        
+        // Só mostra se tem estoque > 0
+        const totalEstoque = p.estoque.reduce((acc, est) => acc + est.quantidade, 0);
+        return totalEstoque > 0;
     }).slice(0, 6);
   }, [busca, produtos]);
 
@@ -351,13 +338,17 @@ export default function VendaPage() {
       setModalPagamento(true);
   }
 
+  // --- CONFIRMAR VENDA ---
   async function confirmarVenda() {
     setLoading(true);
+    
+    // Preparar Payload para a RPC (Procedure no Banco)
     const itensPayload = carrinho.map(i => ({
       produto_id: i.produto_id,
-      produto_cor_id: i.produto_cor_id,
       estoque_id: i.estoque_id,
-      descricao_completa: i.descricao,
+      // Como removemos produto_cor_id, não enviamos ou enviamos null se a procedure esperar
+      // Ajuste importante: A descrição completa para histórico agora concatena cor e tamanho
+      descricao_completa: `${i.descricao} - ${i.cor} (${i.tamanho})`,
       quantidade: i.qtd,
       preco_unitario: i.preco,
       subtotal: i.preco * i.qtd
@@ -408,11 +399,11 @@ export default function VendaPage() {
           <h1 className="font-black italic text-xl uppercase">UpFitness <span className="font-light text-pink-500">Checkout</span></h1>
         </header>
 
-        <div className="relative z-30 flex flex-col gap-3"> {/* Z-Index reduzido de 50 para 30 */}
+        <div className="relative z-30 flex flex-col gap-3">
             <input 
                 autoFocus 
                 type="text" 
-                placeholder="🔎 Buscar ou EAN..." 
+                placeholder="🔎 Buscar, SKU ou EAN..." 
                 className="w-full p-4 rounded-2xl bg-slate-900 border-2 border-slate-800 focus:border-pink-500 outline-none text-base font-bold shadow-xl text-white h-16" 
                 value={busca} 
                 onChange={e => setBusca(e.target.value)} 
@@ -433,7 +424,10 @@ export default function VendaPage() {
                 <div className="absolute top-full left-0 right-0 mt-2 bg-slate-800 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden z-50 max-h-[50vh] overflow-y-auto">
                     {produtosFiltrados.map(p => (
                         <button key={p.id} onClick={() => handleSelecionarProduto(p)} className="w-full text-left p-5 hover:bg-slate-700 border-b border-slate-700/50 last:border-0 flex justify-between items-center transition-colors active:bg-slate-600">
-                            <div><p className="font-bold text-white text-sm uppercase">{p.descricao}</p><p className="text-[10px] font-mono text-slate-400">{p.codigo_peca}</p></div>
+                            <div>
+                                <p className="font-bold text-white text-sm uppercase">{p.descricao}</p>
+                                <p className="text-[10px] font-mono text-slate-400">{p.codigo_peca} | {p.cor}</p>
+                            </div>
                             <span className="font-black text-emerald-400 text-sm">{formatBRL(p.preco_venda)}</span>
                         </button>
                     ))}
@@ -446,7 +440,7 @@ export default function VendaPage() {
             <p className="text-sm font-bold uppercase tracking-widest text-center">Use a busca ou câmera<br/>para adicionar itens</p>
         </div>
 
-        {/* BARRA INFERIOR MOBILE (Z-index reduzido para 20) */}
+        {/* BARRA INFERIOR MOBILE */}
         <div className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-800 p-4 pb-8 flex items-center justify-between shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-20" onClick={() => setAbaMobile('carrinho')}>
             <div className="flex flex-col">
                 <span className="text-[10px] text-slate-500 font-bold uppercase">Total ({qtdItensCarrinho} itens)</span>
@@ -471,7 +465,7 @@ export default function VendaPage() {
                     </div>
                     <div className="flex-1 min-w-0 flex flex-col justify-center">
                         <p className="text-xs font-black text-white leading-tight mb-1 line-clamp-2">{item.descricao}</p>
-                        {item.ean && <p className="text-[8px] font-mono text-slate-600 mb-1">EAN: {item.ean}</p>}
+                        <p className="text-[9px] font-bold text-slate-500 mb-1 uppercase">{item.cor} • {item.tamanho}</p>
                         <p className="text-[10px] text-slate-400 font-mono">{formatBRL(item.preco)} un.</p>
                     </div>
                     <div className="flex flex-col items-end justify-between py-1">
@@ -493,35 +487,30 @@ export default function VendaPage() {
         </div>
       </div>
 
-      {/* --- MODAL DE CONFERÊNCIA (V5.0: Z-INDEX MAXIMO + CENTRALIZADO + FOTO COMPACTA) --- */}
+      {/* MODAL DE CONFERÊNCIA */}
       {itemPendente && (
         <div className="fixed inset-0 z-[10000] bg-black/95 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in zoom-in-95 duration-200">
             <div className="bg-slate-900 w-full max-w-xs rounded-3xl p-6 border border-slate-700 shadow-2xl relative flex flex-col gap-5">
-                
                 <div className="text-center space-y-1">
                     <span className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Confirmação</span>
                     <h3 className="text-sm font-black uppercase text-white leading-tight line-clamp-2">{itemPendente.produto.descricao}</h3>
                 </div>
-
-                {/* FOTO COMPACTA (w-32) */}
                 <div className="relative aspect-square bg-black rounded-2xl border-2 border-slate-700 overflow-hidden shadow-2xl mx-auto w-32 shrink-0">
-                    {itemPendente.pc.foto_url && signedMap[itemPendente.pc.foto_url] ? (
+                    {itemPendente.produto.foto_url && signedMap[itemPendente.produto.foto_url] ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={signedMap[itemPendente.pc.foto_url]} className="w-full h-full object-cover" alt="" />
+                        <img src={signedMap[itemPendente.produto.foto_url]} className="w-full h-full object-cover" alt="" />
                     ) : (
                         <div className="w-full h-full flex items-center justify-center text-4xl opacity-20">📷</div>
                     )}
                     <div className="absolute bottom-0 left-0 right-0 bg-black/80 backdrop-blur-sm p-1 flex justify-between items-center px-2">
-                        <span className="text-[9px] font-bold text-white uppercase truncate">{itemPendente.pc.cor.nome}</span>
+                        <span className="text-[9px] font-bold text-white uppercase truncate">{itemPendente.produto.cor}</span>
                         <span className="text-[9px] font-black text-white bg-pink-600 px-1.5 py-0.5 rounded-md">{itemPendente.est.tamanho.nome}</span>
                     </div>
                 </div>
-
                 <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex justify-between items-center shrink-0">
                     <span className="text-[10px] text-slate-500 font-bold uppercase">Valor</span>
                     <span className="text-xl font-black text-emerald-400">{formatBRL(itemPendente.produto.preco_venda)}</span>
                 </div>
-
                 <div className="grid grid-cols-2 gap-3 shrink-0">
                     <button onClick={() => setItemPendente(null)} className="bg-slate-800 text-slate-400 font-bold py-3 rounded-xl text-[10px] uppercase active:scale-95 transition-transform hover:bg-slate-700 hover:text-white">Cancelar</button>
                     <button onClick={confirmarAdicao} className="bg-blue-600 text-white font-black py-3 rounded-xl text-[10px] uppercase shadow-lg shadow-blue-900/20 active:scale-95 transition-transform hover:bg-blue-500">ADICIONAR</button>
@@ -530,7 +519,7 @@ export default function VendaPage() {
         </div>
       )}
 
-      {/* OUTROS MODAIS (SELEÇÃO MANUAL) */}
+      {/* MODAL SELEÇÃO MANUAL */}
       {modalSelecao && (
             <div className="fixed inset-0 z-[50] bg-black/90 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-6 animate-in fade-in duration-200">
                 <div className="bg-slate-900 w-full max-w-lg rounded-t-[2rem] md:rounded-[2rem] p-6 border-t md:border border-slate-800 shadow-2xl relative max-h-[90vh] overflow-hidden flex flex-col">
@@ -538,48 +527,34 @@ export default function VendaPage() {
                         <div>
                             <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Selecionando:</span>
                             <h2 className="text-xl font-black uppercase text-white leading-tight">{modalSelecao.descricao}</h2>
-                            <span className="text-emerald-400 font-bold text-lg">{formatBRL(modalSelecao.preco_venda)}</span>
+                            <p className="text-xs text-slate-400 font-bold mt-1 uppercase">{modalSelecao.cor}</p>
                         </div>
                         <button onClick={() => setModalSelecao(null)} className="bg-slate-800 w-10 h-10 rounded-full text-slate-400 hover:text-white font-bold text-xl active:scale-90">✕</button>
                     </div>
                     <div className="space-y-4 overflow-y-auto pr-1 pb-10">
-                        {modalSelecao.produto_cores.map(pc => {
-                            const total = pc.estoque.reduce((acc, e) => acc + e.quantidade, 0);
-                            if (total === 0) return null;
-                            const estoqueOrdenado = ordenarEstoque(pc.estoque);
-                            return (
-                                <div key={pc.id} className="bg-slate-950 p-4 rounded-2xl border border-slate-800">
-                                    <div className="flex items-center gap-3 mb-3 pb-2 border-b border-slate-800/50">
-                                        <div className="w-10 h-10 rounded-lg bg-slate-800 overflow-hidden border border-slate-700">
-                                            {pc.foto_url && signedMap[pc.foto_url] ? <img src={signedMap[pc.foto_url]} className="w-full h-full object-cover" alt="" /> : <div className="w-full h-full bg-pink-500"></div>}
-                                        </div>
-                                        <span className="font-bold text-sm uppercase text-slate-300">{pc.cor.nome}</span>
-                                    </div>
-                                    <div className="flex flex-wrap gap-2">
-                                        {estoqueOrdenado.map(est => {
-                                            const semEstoque = est.quantidade <= 0;
-                                            return (
-                                                <button key={est.id} disabled={semEstoque} onClick={() => prepararAdicao(modalSelecao, pc, est)} className={`flex flex-col items-center justify-center w-16 h-16 rounded-xl border text-xs font-black uppercase transition-all active:scale-95 ${!semEstoque ? 'bg-slate-800 border-slate-600 text-white hover:bg-pink-600 hover:border-pink-500 shadow-lg' : 'bg-red-950/10 border-red-900/20 text-red-800/50 cursor-not-allowed hidden'}`}>
-                                                    <span className="text-sm">{est.tamanho.nome}</span><span className={`text-[9px] ${!semEstoque ? 'text-slate-400' : ''}`}>{est.quantidade}</span>
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-                            );
-                        })}
+                        <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800">
+                            <div className="flex flex-wrap gap-2 justify-center">
+                                {ordenarEstoque(modalSelecao.estoque).map(est => {
+                                    const semEstoque = est.quantidade <= 0;
+                                    return (
+                                        <button key={est.id} disabled={semEstoque} onClick={() => prepararAdicao(modalSelecao, est)} className={`flex flex-col items-center justify-center w-16 h-16 rounded-xl border text-xs font-black uppercase transition-all active:scale-95 ${!semEstoque ? 'bg-slate-800 border-slate-600 text-white hover:bg-pink-600 hover:border-pink-500 shadow-lg' : 'bg-red-950/10 border-red-900/20 text-red-800/50 cursor-not-allowed'}`}>
+                                            <span className="text-sm">{est.tamanho.nome}</span><span className={`text-[9px] ${!semEstoque ? 'text-slate-400' : ''}`}>{est.quantidade}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
       )}
 
-      {/* MODAL PAGAMENTO (Z-Index 200) */}
+      {/* MODAL PAGAMENTO */}
       {modalPagamento && (
         <div className="fixed inset-0 z-[200] bg-black/95 backdrop-blur-md flex items-end md:items-center justify-center p-0 md:p-4">
             <div className="bg-slate-900 w-full max-w-2xl rounded-t-[2.5rem] md:rounded-[2.5rem] border-t md:border border-slate-700 shadow-2xl overflow-hidden flex flex-col max-h-[95vh]">
                 <div className="bg-slate-950 p-6 border-b border-slate-800 flex justify-between items-center shrink-0"><h2 className="text-xl font-black uppercase text-white tracking-widest">Pagamento</h2><button onClick={() => setModalPagamento(false)} className="w-10 h-10 rounded-full bg-slate-800 text-slate-400 hover:text-white font-bold transition active:scale-90">✕</button></div>
                 <div className="flex-1 overflow-y-auto p-6 space-y-8">
-                    {/* ... (Conteúdo do Modal de Pagamento mantido igual) ... */}
                     <div className="space-y-4">
                         <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Desconto / Ajuste</label>
                         <div className="grid grid-cols-1 min-[400px]:grid-cols-2 gap-4">
