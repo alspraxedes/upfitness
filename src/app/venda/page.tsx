@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { supabase } from '../../lib/supabase';
 import { Html5Qrcode } from 'html5-qrcode';
 import Cropper from 'react-easy-crop';
+// IMPORTANTE: Verifique se o caminho do componente está correto
+import ReciboModal from '../components/ReciboModal'; 
 
 // --- TIPOS ---
 type EstoqueItem = {
@@ -25,7 +27,7 @@ type Produto = {
   preco_compra?: number;
   custo_frete?: number;
   custo_embalagem?: number;
-  estoque: EstoqueItem[]; // Agora direto no produto
+  estoque: EstoqueItem[]; 
 };
 
 type ItemCarrinho = {
@@ -94,11 +96,15 @@ export default function VendaPage() {
   const [abaMobile, setAbaMobile] = useState<'busca' | 'carrinho'>('busca');
   const [carrinho, setCarrinho] = useState<ItemCarrinho[]>([]);
   
-  // Modais
+  // Modais e Recibo
   const [modalSelecao, setModalSelecao] = useState<Produto | null>(null);
   const [mostrarScanner, setMostrarScanner] = useState(false);
   const [modalPagamento, setModalPagamento] = useState(false);
   const [itemPendente, setItemPendente] = useState<{ produto: Produto, est: EstoqueItem } | null>(null);
+  
+  // NOVOS ESTADOS PARA O RECIBO
+  const [mostrarRecibo, setMostrarRecibo] = useState(false);
+  const [dadosRecibo, setDadosRecibo] = useState<any>(null);
 
   const [pagamento, setPagamento] = useState({
       metodo: 'pix', 
@@ -118,7 +124,7 @@ export default function VendaPage() {
 
   useEffect(() => { fetchProdutos(); }, []);
 
-  // Assinatura de Fotos (Simplificado)
+  // Assinatura de Fotos
   useEffect(() => {
     (async () => {
         const pathsToSign = new Set<string>();
@@ -218,7 +224,6 @@ export default function VendaPage() {
       else setImgSrc(null);
   }
 
-  // --- NOVA LÓGICA DE ADIÇÃO ---
   function prepararAdicao(produto: Produto, est: EstoqueItem) {
       playBeep();
       setItemPendente({ produto, est });
@@ -309,7 +314,6 @@ export default function VendaPage() {
         const matchEan = p.estoque.some(e => e.codigo_barras?.includes(q));
         if (!matchTexto && !matchEan) return false;
         
-        // Só mostra se tem estoque > 0
         const totalEstoque = p.estoque.reduce((acc, est) => acc + est.quantidade, 0);
         return totalEstoque > 0;
     }).slice(0, 6);
@@ -338,16 +342,13 @@ export default function VendaPage() {
       setModalPagamento(true);
   }
 
-  // --- CONFIRMAR VENDA ---
+  // --- CONFIRMAR VENDA (MODIFICADO PARA RECIBO) ---
   async function confirmarVenda() {
     setLoading(true);
     
-    // Preparar Payload para a RPC (Procedure no Banco)
     const itensPayload = carrinho.map(i => ({
       produto_id: i.produto_id,
       estoque_id: i.estoque_id,
-      // Como removemos produto_cor_id, não enviamos ou enviamos null se a procedure esperar
-      // Ajuste importante: A descrição completa para histórico agora concatena cor e tamanho
       descricao_completa: `${i.descricao} - ${i.cor} (${i.tamanho})`,
       quantidade: i.qtd,
       preco_unitario: i.preco,
@@ -367,11 +368,27 @@ export default function VendaPage() {
     if (error) {
       alert('Erro: ' + error.message);
     } else {
-      alert(`✅ Venda Sucesso!`);
-      setModalPagamento(false);
-      setCarrinho([]); 
+      // SUCESSO! PREPARA O RECIBO E LIMPA O CARRINHO
+      const dadosParaRecibo = {
+          itens: carrinho.map(i => ({
+              descricao: i.descricao,
+              quantidade: i.qtd,
+              preco_venda: i.preco,
+              tamanho: i.tamanho
+          })),
+          subtotal: totalBruto,
+          desconto: totalBruto - pagamento.valorFinal,
+          totalFinal: pagamento.valorFinal,
+          metodoPagamento: pagamento.metodo,
+          data: new Date()
+      };
+
+      setDadosRecibo(dadosParaRecibo);
+      setMostrarRecibo(true); // Abre o Recibo
+      setModalPagamento(false); // Fecha o Pagamento
+      setCarrinho([]); // Limpa o carrinho
       setAbaMobile('busca');
-      await fetchProdutos();
+      await fetchProdutos(); // Atualiza estoque em segundo plano
     }
   }
 
@@ -611,6 +628,14 @@ export default function VendaPage() {
                 </div>
             </div>
       )}
+
+      {/* NOVO: MODAL DE RECIBO */}
+      <ReciboModal 
+        visivel={mostrarRecibo} 
+        dados={dadosRecibo} 
+        onClose={() => setMostrarRecibo(false)} 
+      />
+
     </div>
   );
 }

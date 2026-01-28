@@ -82,7 +82,7 @@ export default function Dashboard() {
             `)
           .eq('descontinuado', false) // Opcional: só mostra ativos
           .order('created_at', { ascending: false })
-          .limit(100);
+          .limit(1000);
 
         if (error) throw error;
         
@@ -188,6 +188,9 @@ export default function Dashboard() {
           <Link href="/venda" className="bg-emerald-500 text-white py-3 md:py-2 px-3 md:px-5 rounded-xl md:rounded-full text-[10px] font-black hover:scale-105 active:scale-95 transition-transform shadow-xl uppercase tracking-widest flex items-center justify-center gap-1 text-center">
              <span className="text-sm">🛒</span> PDV
           </Link>
+          <Link href="/historico" className="bg-slate-700 text-white py-3 md:py-2 px-3 md:px-5 rounded-xl md:rounded-full text-[10px] font-black hover:scale-105 active:scale-95 transition-transform shadow-xl uppercase tracking-widest flex items-center justify-center gap-1 text-center">
+    <span className="text-sm">📅</span> HIST
+  </Link>
           <button type="button" onClick={async () => { await supabase.auth.signOut(); router.replace('/login'); }} className="bg-black/30 py-3 md:py-2 px-3 md:px-5 rounded-xl md:rounded-full text-[10px] font-bold tracking-widest border border-white/10 hover:bg-black/40 text-white active:scale-95 transition-transform flex items-center justify-center">
             SAIR
           </button>
