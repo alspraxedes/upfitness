@@ -323,15 +323,17 @@ export default function CadastroPage() {
                      <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-1">
                             <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Cód. Interno</label>
-                            <input readOnly value={formData.codigo_peca} className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-slate-400 font-mono text-xs font-bold text-center tracking-widest" />
+                            {/* AQUI ESTAVA text-sm -> AJUSTADO PARA text-base md:text-sm */}
+                            <input readOnly value={formData.codigo_peca} className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-slate-400 font-mono text-base md:text-sm font-bold text-center tracking-widest" />
                         </div>
                         <div className="space-y-1">
                             <label className="text-[9px] font-black text-slate-500 uppercase ml-1">SKU Fornecedor</label>
+                            {/* AQUI ESTAVA text-xs -> AJUSTADO PARA text-base md:text-xs */}
                             <input 
                                 value={formData.sku_fornecedor} 
                                 onChange={e => setFormData({...formData, sku_fornecedor: e.target.value})} 
                                 placeholder="Ex: REF-998"
-                                className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-white font-bold text-xs focus:border-pink-500 outline-none" 
+                                className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-white font-bold text-base md:text-xs focus:border-pink-500 outline-none" 
                             />
                         </div>
                      </div>

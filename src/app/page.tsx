@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
 import { Html5Qrcode } from 'html5-qrcode';
+import Image from 'next/image'; // Importação do componente otimizado
 
 // --- UTILITÁRIOS ---
 function formatBRL(v: any) {
@@ -242,8 +243,15 @@ export default function Dashboard() {
                   {/* FOTO E CÓDIGO */}
                   <div className="w-28 bg-slate-950 relative flex-shrink-0 border-r border-slate-800">
                     {urlAssinada ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={urlAssinada} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" alt="Foto" loading="lazy" />
+                      // AQUI ESTÁ A MUDANÇA PRINCIPAL
+                      <Image 
+                        src={urlAssinada} 
+                        alt={produto.descricao || 'Produto'}
+                        width={250} 
+                        height={250}
+                        className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity"
+                        unoptimized={false} // Garante que o otimizador do Next atue
+                      />
                     ) : (
                       <div className="w-full h-full flex flex-col items-center justify-center text-slate-700 bg-slate-950/50">
                         <span className="text-2xl opacity-30">📷</span>

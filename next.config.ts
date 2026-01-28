@@ -1,7 +1,14 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "jdduvyrrilnxlwbieqjr.supabase.co", // O endereço exato do seu erro
+      },
+    ],
+  },
 };
 
 export default nextConfig;
