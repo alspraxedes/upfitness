@@ -88,11 +88,11 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
   async function carregarDados() {
     setLoading(true);
     
-    // 1. Carregar Tamanhos para o Select
+    // 1. Carregar Tamanhos
     const { data: tams } = await supabase.from('tamanhos').select('*').order('ordem');
     setListaTamanhos(tams || []);
 
-    // 2. Carregar Produto + Estoque
+    // 2. Carregar Produto
     const { data, error } = await supabase
       .from('produtos')
       .select(`*, estoque(*, tamanho:tamanhos(*))`)
@@ -104,12 +104,12 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
         return router.push('/'); 
     }
     
-    // Ordenar estoque (P, M, G...)
+    // Ordenar estoque
     if (data.estoque) data.estoque.sort((a:any, b:any) => (a.tamanho?.ordem ?? 99) - (b.tamanho?.ordem ?? 99));
 
     setProduto(data);
     
-    // Gerar URL Assinada da Foto
+    // URL Foto
     if (data.foto_url) {
         const path = extractPath(data.foto_url);
         if (path) {
@@ -125,7 +125,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     setFormData({
         descricao: data.descricao, fornecedor: data.fornecedor, 
         sku_fornecedor: data.sku_fornecedor || '', cor: data.cor || '',
-        preco_compra: data.preco_compra, custo_frete: data.custo_frete, custo_embalagem: data.custo_embalagem,
+        preco_compra: data.preco_compra || 0, custo_frete: data.custo_frete || 0, custo_embalagem: data.custo_embalagem || 0,
         preco_venda: data.preco_venda, margem_ganho: parseFloat(margem.toFixed(1)),
         descontinuado: data.descontinuado
     });
@@ -153,7 +153,6 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
       setLoading(false);
   };
 
-  // Câmera Foto
   const abrirCameraFoto = async () => {
     setFotoTemp(null);
     try {
@@ -184,9 +183,37 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
       carregarDados();
   };
 
+  // --- LÓGICA FINANCEIRA ---
+  
+  // 1. Alterou Custo ou Preço Venda -> Recalcula Margem
   const handleMoneyInput = (val: string, field: string) => {
      const num = parseFloat(val.replace(/\D/g, '')) / 100;
-     setFormData({...formData, [field]: num || 0});
+     const newData = { ...formData, [field]: num || 0 };
+
+     const custoTotal = newData.preco_compra + newData.custo_frete + newData.custo_embalagem;
+     
+     // Se mexeu nos custos, mantemos o preço de venda e recalculamos a margem
+     // Se mexeu no preço de venda, recalculamos a margem
+     const margem = custoTotal > 0 
+        ? ((newData.preco_venda - custoTotal) / custoTotal) * 100 
+        : 100; 
+
+     setFormData({ ...newData, margem_ganho: parseFloat(margem.toFixed(1)) });
+  };
+
+  // 2. Alterou Margem -> Recalcula Preço Venda
+  const handleMarginInput = (val: string) => {
+      const margem = parseFloat(val);
+      if (isNaN(margem)) return setFormData({ ...formData, margem_ganho: 0 }); // Permite limpar o campo
+      
+      const custoTotal = formData.preco_compra + formData.custo_frete + formData.custo_embalagem;
+      const novoPrecoVenda = custoTotal * (1 + margem / 100);
+
+      setFormData({ 
+          ...formData, 
+          margem_ganho: margem,
+          preco_venda: novoPrecoVenda 
+      });
   };
 
   // --- ESTOQUE E SCANNER ---
@@ -265,12 +292,20 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
         {/* IDENTIFICAÇÃO E FOTO */}
         <section className="bg-slate-900 p-6 rounded-[2rem] border border-slate-800 shadow-xl flex flex-col md:flex-row gap-6">
             <div className="shrink-0 flex justify-center">
-                 <button onClick={() => setModalFoto(true)} className="w-32 h-32 rounded-3xl bg-slate-950 border-2 border-slate-700 overflow-hidden relative group shadow-lg">
+                 <button 
+                    onClick={() => editando && setModalFoto(true)} 
+                    className={`w-32 h-32 rounded-3xl bg-slate-950 border-2 border-slate-700 overflow-hidden relative group shadow-lg ${editando ? 'cursor-pointer hover:border-pink-500' : 'cursor-default'}`}
+                 >
                     {signedUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img src={signedUrl} className="w-full h-full object-cover" alt="" /> 
                     ) : <span className="text-4xl opacity-30">📷</span>}
-                    <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity font-bold text-[10px] text-white">ALTERAR</div>
+                    
+                    {editando && (
+                        <div className="absolute bottom-0 inset-x-0 bg-black/70 py-1 flex items-center justify-center gap-1 backdrop-blur-sm animate-in fade-in">
+                            <span className="text-[10px] text-white font-bold uppercase tracking-wide">📷 Alterar</span>
+                        </div>
+                    )}
                  </button>
             </div>
             
@@ -291,6 +326,36 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                         <div className="space-y-1">
                              <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Descrição</label>
                              <input value={formData.descricao} onChange={e => setFormData({...formData, descricao: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-sm focus:border-pink-500 outline-none" />
+                        </div>
+
+                        {/* CUSTOS E MARGEM */}
+                        <div className="grid grid-cols-4 gap-2 bg-slate-950/50 p-3 rounded-xl border border-slate-800/50">
+                             <div className="space-y-1">
+                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Compra</label>
+                                <input type="tel" value={formatBRL(formData.preco_compra)} onChange={e => handleMoneyInput(e.target.value, 'preco_compra')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" />
+                             </div>
+                             <div className="space-y-1">
+                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Frete</label>
+                                <input type="tel" value={formatBRL(formData.custo_frete)} onChange={e => handleMoneyInput(e.target.value, 'custo_frete')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" />
+                             </div>
+                             <div className="space-y-1">
+                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Emb.</label>
+                                <input type="tel" value={formatBRL(formData.custo_embalagem)} onChange={e => handleMoneyInput(e.target.value, 'custo_embalagem')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" />
+                             </div>
+                             
+                             {/* MARGEM EDITÁVEL */}
+                             <div className="space-y-1">
+                                <label className="text-[9px] font-black text-green-500 uppercase ml-1">Margem %</label>
+                                <div className="relative">
+                                    <input 
+                                        type="number" 
+                                        value={formData.margem_ganho} 
+                                        onChange={e => handleMarginInput(e.target.value)} 
+                                        className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-green-400 font-bold text-xs focus:border-green-500 outline-none pr-6" 
+                                    />
+                                    <span className="absolute right-2 top-2 text-xs text-green-600 font-bold">%</span>
+                                </div>
+                             </div>
                         </div>
 
                         <div className="flex items-center gap-4 pt-2">
@@ -333,13 +398,11 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                             <span className={`text-lg font-black ${est.quantidade > 0 ? 'text-white' : 'text-red-500'}`}>{est.quantidade}</span>
                         </div>
                         
-                        {/* AQUI ESTAVA O ERRO: Removi corNome: '' */}
                         <button onClick={() => setModalEstoque({ aberto: true, tipo: 'edicao', itemEstoqueId: est.id, tamanhoNome: est.tamanho.nome, qtdAtual: 0, qtdOperacao: '', eanAtual: est.codigo_barras || '', scanning: false })} className="bg-slate-950 py-2 rounded-lg text-[9px] font-mono text-slate-500 truncate border border-slate-800 hover:border-blue-500/50 transition-colors">
                             {est.codigo_barras || 'SEM EAN'}
                         </button>
                         
                         <div className="flex gap-2">
-                             {/* AQUI TAMBÉM: Removi corNome: '' */}
                              <button onClick={() => setModalEstoque({ aberto: true, tipo: 'saida', itemEstoqueId: est.id, tamanhoNome: est.tamanho.nome, qtdAtual: est.quantidade, qtdOperacao: '', eanAtual: '', scanning: false })} className="flex-1 bg-red-900/20 text-red-500 rounded-lg font-bold hover:bg-red-600 hover:text-white transition h-8 flex items-center justify-center active:scale-90">-</button>
                              <button onClick={() => setModalEstoque({ aberto: true, tipo: 'entrada', itemEstoqueId: est.id, tamanhoNome: est.tamanho.nome, qtdAtual: est.quantidade, qtdOperacao: '', eanAtual: '', scanning: false })} className="flex-1 bg-green-900/20 text-green-500 rounded-lg font-bold hover:bg-green-600 hover:text-white transition h-8 flex items-center justify-center active:scale-90">+</button>
                         </div>
@@ -399,7 +462,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
           </div>
       )}
 
-      {/* MODAL ESTOQUE & EAN (Reutilizado Lógica Simples) */}
+      {/* MODAL ESTOQUE & EAN */}
       {modalEstoque.aberto && (
           <div className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
               <div className="bg-slate-900 p-6 rounded-3xl w-full max-w-xs border border-slate-800 shadow-2xl space-y-4">
