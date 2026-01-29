@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
 import { Html5Qrcode } from 'html5-qrcode';
-import Image from 'next/image'; // Importação do componente otimizado
+import Image from 'next/image';
 
 // --- UTILITÁRIOS ---
 function formatBRL(v: any) {
@@ -43,6 +43,9 @@ export default function Dashboard() {
   const [busca, setBusca] = useState('');
   const [loading, setLoading] = useState(true);
   const [mostrarScanner, setMostrarScanner] = useState(false);
+  
+  // NOVO: Estado para os filtros de tamanho
+  const [tamanhosSelecionados, setTamanhosSelecionados] = useState<string[]>([]);
 
   // Controle
   const dataFetchedRef = useRef(false);
@@ -70,7 +73,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2. BUSCA (Nova Query Otimizada)
+  // 2. BUSCA
   async function fetchProdutos() {
     setLoading(true);
     try {
@@ -80,13 +83,13 @@ export default function Dashboard() {
               id, codigo_peca, sku_fornecedor, descricao, cor, foto_url, preco_venda, created_at,
               estoque ( quantidade, codigo_barras, tamanho:tamanhos ( nome, ordem ) )
             `)
-          .eq('descontinuado', false) // Opcional: só mostra ativos
+          .eq('descontinuado', false)
           .order('created_at', { ascending: false })
           .limit(1000);
 
         if (error) throw error;
         
-        // Ordenar estoque por tamanho (P, M, G...)
+        // Ordenar estoque internamente
         const produtosOrdenados = data?.map(p => ({
             ...p,
             estoque: p.estoque?.sort((a: any, b: any) => (a.tamanho?.ordem ?? 99) - (b.tamanho?.ordem ?? 99))
@@ -100,7 +103,7 @@ export default function Dashboard() {
     }
   }
 
-  // 3. IMAGENS (Simplificado)
+  // 3. IMAGENS
   useEffect(() => {
     if (produtos.length === 0) return;
     const carregarImagens = async () => {
@@ -124,7 +127,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [produtos]); 
 
-  // --- 4. SCANNER TURBO ---
+  // --- SCANNER ---
   useEffect(() => {
     if (mostrarScanner) {
         const elementId = "reader-dashboard-direct";
@@ -157,25 +160,58 @@ export default function Dashboard() {
       setMostrarScanner(false);
   };
 
-  // Filtro Inteligente (Nome, Código, SKU Fornecedor, EAN)
+  // --- LOGICA DE FILTROS ---
+
+  // 1. Extrair tamanhos únicos disponíveis nos produtos carregados
+  const tamanhosDisponiveis = useMemo(() => {
+      const map = new Map<string, number>();
+      produtos.forEach(p => {
+          p.estoque?.forEach((e: any) => {
+              if (e.tamanho?.nome && !map.has(e.tamanho.nome)) {
+                  map.set(e.tamanho.nome, e.tamanho.ordem ?? 999);
+              }
+          });
+      });
+      // Retorna array ordenado pela ordem do tamanho
+      return Array.from(map.entries()).sort((a, b) => a[1] - b[1]).map(x => x[0]);
+  }, [produtos]);
+
+  const toggleTamanho = (tam: string) => {
+      setTamanhosSelecionados(prev => 
+          prev.includes(tam) ? prev.filter(t => t !== tam) : [...prev, tam]
+      );
+  };
+
+  // 2. Filtro Combinado (Texto + Tamanhos)
   const filtrados = useMemo(() => {
     const q = busca.trim().toLowerCase();
-    if (!q) return produtos;
+    
     return produtos.filter(p => {
+      // 1. Filtro de Texto
       const d = (p.descricao||'').toLowerCase();
       const c = (p.codigo_peca||'').toLowerCase();
       const sku = (p.sku_fornecedor||'').toLowerCase();
       const cor = (p.cor||'').toLowerCase();
       const ean = p.estoque?.some((e: any) => e.codigo_barras?.toLowerCase().includes(q));
-      return d.includes(q) || c.includes(q) || sku.includes(q) || cor.includes(q) || ean;
+      
+      const matchTexto = !q || d.includes(q) || c.includes(q) || sku.includes(q) || cor.includes(q) || ean;
+
+      // 2. Filtro de Tamanho (Se houver algum selecionado)
+      let matchTamanho = true;
+      if (tamanhosSelecionados.length > 0) {
+          // O produto deve ter pelo menos um item de estoque cujo tamanho esteja na lista de selecionados
+          matchTamanho = p.estoque?.some((e: any) => tamanhosSelecionados.includes(e.tamanho?.nome));
+      }
+
+      return matchTexto && matchTamanho;
     });
-  }, [busca, produtos]);
+  }, [busca, produtos, tamanhosSelecionados]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
       
       {/* HEADER */}
-      <header className="bg-gradient-to-r from-pink-600 to-blue-600 p-4 md:p-6 shadow-2xl mb-6 flex flex-col md:flex-row justify-between items-center sticky top-0 z-50 gap-4 transition-all">
+      <header className="bg-gradient-to-r from-pink-600 to-blue-600 p-4 md:p-6 shadow-2xl mb-4 flex flex-col md:flex-row justify-between items-center sticky top-0 z-50 gap-4 transition-all">
         <div className="flex flex-col items-center md:items-start w-full md:w-auto">
             <h1 className="font-black italic text-xl tracking-tighter text-center md:text-left">
             UPFITNESS <span className="font-light tracking-normal text-white/80">Estoque</span>
@@ -189,8 +225,8 @@ export default function Dashboard() {
              <span className="text-sm">🛒</span> PDV
           </Link>
           <Link href="/historico" className="bg-slate-700 text-white py-3 md:py-2 px-3 md:px-5 rounded-xl md:rounded-full text-[10px] font-black hover:scale-105 active:scale-95 transition-transform shadow-xl uppercase tracking-widest flex items-center justify-center gap-1 text-center">
-    <span className="text-sm">📅</span> HIST
-  </Link>
+            <span className="text-sm">📅</span> HIST
+          </Link>
           <button type="button" onClick={async () => { await supabase.auth.signOut(); router.replace('/login'); }} className="bg-black/30 py-3 md:py-2 px-3 md:px-5 rounded-xl md:rounded-full text-[10px] font-bold tracking-widest border border-white/10 hover:bg-black/40 text-white active:scale-95 transition-transform flex items-center justify-center">
             SAIR
           </button>
@@ -200,7 +236,7 @@ export default function Dashboard() {
       <main className="max-w-7xl mx-auto px-4 pb-24">
         
         {/* BARRA DE BUSCA */}
-        <div className="flex gap-2 mb-8 relative z-40">
+        <div className="flex gap-2 mb-4 relative z-40">
             <div className="relative flex-1 group">
                 <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
                     <span className="text-xl">🔍</span>
@@ -221,6 +257,44 @@ export default function Dashboard() {
             </button>
         </div>
 
+        {/* --- FILTRO DE TAMANHOS (SCROLL HORIZONTAL) --- */}
+        {!loading && tamanhosDisponiveis.length > 0 && (
+            <div className="mb-6 overflow-x-auto pb-2 no-scrollbar -mx-4 px-4 md:mx-0 md:px-0">
+                <div className="flex gap-2 w-max">
+                    {/* Botão Limpar Filtro */}
+                    {tamanhosSelecionados.length > 0 && (
+                        <button 
+                            onClick={() => setTamanhosSelecionados([])}
+                            className="bg-red-900/30 text-red-400 border border-red-500/30 px-4 py-2 rounded-xl text-xs font-black uppercase whitespace-nowrap active:scale-95 transition-all flex items-center gap-1"
+                        >
+                            ✕ Limpar
+                        </button>
+                    )}
+                    
+                    {/* Lista de Tamanhos */}
+                    {tamanhosDisponiveis.map(tam => {
+                        const ativo = tamanhosSelecionados.includes(tam);
+                        return (
+                            <button
+                                key={tam}
+                                onClick={() => toggleTamanho(tam)}
+                                className={`
+                                    px-5 py-2 rounded-xl text-xs font-black uppercase whitespace-nowrap shadow-md transition-all active:scale-95 border
+                                    ${ativo 
+                                        ? 'bg-pink-600 border-pink-500 text-white scale-105 shadow-pink-900/50' 
+                                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-white hover:border-slate-600'
+                                    }
+                                `}
+                            >
+                                {tam}
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+        )}
+
+        {/* LISTAGEM DE PRODUTOS */}
         {loading ? (
           <div className="flex flex-col items-center justify-center py-20 gap-4 opacity-50 animate-pulse">
             <div className="w-12 h-12 border-4 border-pink-500 border-t-transparent rounded-full animate-spin"></div>
@@ -230,6 +304,9 @@ export default function Dashboard() {
           <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-500">
              <span className="text-4xl">📦</span>
              <p className="font-bold text-sm">Nenhum produto encontrado.</p>
+             {tamanhosSelecionados.length > 0 && (
+                 <button onClick={() => setTamanhosSelecionados([])} className="text-pink-500 text-xs font-bold underline">Limpar filtros de tamanho</button>
+             )}
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
@@ -246,14 +323,13 @@ export default function Dashboard() {
                   {/* FOTO E CÓDIGO */}
                   <div className="w-28 bg-slate-950 relative flex-shrink-0 border-r border-slate-800">
                     {urlAssinada ? (
-                      // AQUI ESTÁ A MUDANÇA PRINCIPAL
                       <Image 
                         src={urlAssinada} 
                         alt={produto.descricao || 'Produto'}
                         width={250} 
                         height={250}
                         className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity"
-                        unoptimized={false} // Garante que o otimizador do Next atue
+                        unoptimized={false}
                       />
                     ) : (
                       <div className="w-full h-full flex flex-col items-center justify-center text-slate-700 bg-slate-950/50">
@@ -283,16 +359,22 @@ export default function Dashboard() {
                         </span>
                     </div>
 
+                    {/* GRADE DE TAMANHOS (Destaca os selecionados no filtro) */}
                     <div className="flex-1 flex flex-wrap content-start gap-1">
-                        {produto.estoque?.map((item: any, i: number) => (
-                            <span key={i} className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${
-                                (item.quantidade||0) > 0 
-                                ? 'bg-slate-800 border-slate-700 text-slate-300' 
-                                : 'bg-red-950/20 border-red-900/30 text-red-500 opacity-50'
-                            }`}>
-                                {item.tamanho?.nome} <span className="text-white/50">x{item.quantidade}</span>
-                            </span>
-                        ))}
+                        {produto.estoque?.map((item: any, i: number) => {
+                            const isSelected = tamanhosSelecionados.includes(item.tamanho?.nome);
+                            return (
+                                <span key={i} className={`text-[8px] font-bold px-1.5 py-0.5 rounded border transition-colors ${
+                                    isSelected 
+                                    ? 'bg-pink-600 border-pink-500 text-white shadow-sm' // Destaque se filtrado
+                                    : (item.quantidade||0) > 0 
+                                        ? 'bg-slate-800 border-slate-700 text-slate-300' 
+                                        : 'bg-red-950/20 border-red-900/30 text-red-500 opacity-50'
+                                }`}>
+                                    {item.tamanho?.nome} <span className={isSelected ? 'text-white' : 'text-white/50'}>x{item.quantidade}</span>
+                                </span>
+                            );
+                        })}
                     </div>
 
                     <div className="mt-2 pt-1 border-t border-slate-800 flex justify-between items-center">
