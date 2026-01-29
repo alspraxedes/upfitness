@@ -1,17 +1,25 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { supabase } from '../../lib/supabase';
 
-// --- TIPOS ---
+// --- TIPOS ATUALIZADOS ---
 type ItemVenda = {
   id: string;
   descricao_completa: string;
   quantidade: number;
   preco_unitario: number;
   subtotal: number;
-  estoque_id: string; // Importante para devolver ao estoque
+  estoque_id: string;
+  // Estrutura aninhada para pegar os custos do produto via estoque
+  estoque?: {
+    produto?: {
+      preco_compra: number;
+      custo_frete: number;
+      custo_embalagem: number;
+    }
+  }
 };
 
 type Venda = {
@@ -60,9 +68,19 @@ export default function HistoricoPage() {
 
   async function fetchVendas() {
     setLoading(true);
+    
+    // QUERY ATUALIZADA: Busca custos dentro de estoque -> produto
     let query = supabase
       .from('vendas')
-      .select(`*, itens_venda ( * )`)
+      .select(`
+        *,
+        itens_venda (
+          *,
+          estoque (
+            produto:produtos ( preco_compra, custo_frete, custo_embalagem )
+          )
+        )
+      `)
       .order('created_at', { ascending: false });
 
     if (dataInicio) query = query.gte('created_at', `${dataInicio}T00:00:00`);
@@ -74,45 +92,52 @@ export default function HistoricoPage() {
     setLoading(false);
   }
 
+  // --- CÁLCULOS FINANCEIROS (Memoizado para performance) ---
+  const metricas = useMemo(() => {
+      let faturamento = 0;
+      let custoTotal = 0;
+
+      vendas.forEach(venda => {
+          faturamento += (venda.valor_liquido || 0);
+          
+          venda.itens_venda.forEach(item => {
+              const prod = item.estoque?.produto;
+              if (prod) {
+                  const custoUnitario = (prod.preco_compra || 0) + (prod.custo_frete || 0) + (prod.custo_embalagem || 0);
+                  custoTotal += custoUnitario * item.quantidade;
+              }
+          });
+      });
+
+      const lucro = faturamento - custoTotal;
+      // Margem baseada no Markup (Lucro sobre Custo) conforme lógica anterior, ou Margem Bruta (Lucro sobre Venda)
+      // Vou usar Markup ((Venda - Custo) / Custo) para manter consistência com o cadastro de produtos
+      const margem = custoTotal > 0 ? (lucro / custoTotal) * 100 : 0;
+
+      return { faturamento, custoTotal, lucro, margem };
+  }, [vendas]);
+
   // Lógica de Cancelamento/Exclusão
   const executarAcao = async () => {
     if (!modalConfirmacao) return;
     setProcessandoAcao(true);
-
     const { tipo, venda } = modalConfirmacao;
 
     try {
       if (tipo === 'cancelar') {
-        // 1. Devolver itens ao estoque
         for (const item of venda.itens_venda) {
-          // Primeiro, pega a quantidade atual
-          const { data: estAtual } = await supabase
-            .from('estoque')
-            .select('quantidade')
-            .eq('id', item.estoque_id)
-            .single();
-
+          const { data: estAtual } = await supabase.from('estoque').select('quantidade').eq('id', item.estoque_id).single();
           if (estAtual) {
-            // Soma a quantidade devolvida
-            await supabase
-              .from('estoque')
-              .update({ quantidade: estAtual.quantidade + item.quantidade })
-              .eq('id', item.estoque_id);
+            await supabase.from('estoque').update({ quantidade: estAtual.quantidade + item.quantidade }).eq('id', item.estoque_id);
           }
         }
       }
-
-      // 2. Apagar a venda (Em ambos os casos a venda é removida do histórico)
-      // O 'delete' na tabela 'vendas' deve apagar os 'itens_venda' automaticamente (cascade)
       const { error } = await supabase.from('vendas').delete().eq('id', venda.id);
-
       if (error) throw error;
-
-      alert(tipo === 'cancelar' ? 'Venda cancelada e estoque devolvido!' : 'Registro de venda apagado!');
       setModalConfirmacao(null);
-      fetchVendas(); // Atualiza a lista
+      fetchVendas(); 
     } catch (err: any) {
-      alert('Erro ao processar: ' + err.message);
+      alert('Erro: ' + err.message);
     } finally {
       setProcessandoAcao(false);
     }
@@ -122,10 +147,8 @@ export default function HistoricoPage() {
     const conteudo = printRef.current?.innerHTML;
     const janela = window.open('', '', 'height=600,width=400');
     if (janela && conteudo) {
-      janela.document.write('<html><head><title>Recibo UPFITNESS</title>');
-      janela.document.write('<style>body { font-family: monospace; padding: 20px; } .row { display: flex; justify-content: space-between; }</style></head><body>');
+      janela.document.write('<html><head><title>Recibo UPFITNESS</title><style>body { font-family: monospace; padding: 20px; } .row { display: flex; justify-content: space-between; }</style></head><body>');
       janela.document.write(conteudo);
-      janela.document.write('</body></html>');
       janela.document.close();
       janela.print();
     }
@@ -137,8 +160,6 @@ export default function HistoricoPage() {
     texto += `--------------------------------%0A*TOTAL: ${formatBRL(v.valor_liquido)}*`;
     window.open(`https://wa.me/?text=${texto}`, '_blank');
   };
-
-  const totalFiltrado = vendas.reduce((acc, v) => acc + (v.valor_liquido || 0), 0);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans pb-24">
@@ -158,10 +179,26 @@ export default function HistoricoPage() {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto p-4 space-y-6">
-        <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 flex justify-between items-center shadow-lg">
-            <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Total no Período</span>
-            <p className="text-2xl font-black text-emerald-400">{formatBRL(totalFiltrado)}</p>
+      <main className="max-w-4xl mx-auto p-4 space-y-6">
+        
+        {/* DASHBOARD DE MÉTRICAS */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+             <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between">
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Faturamento</span>
+                <p className="text-lg md:text-xl font-black text-white truncate">{formatBRL(metricas.faturamento)}</p>
+             </div>
+             <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between">
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Custo Peças</span>
+                <p className="text-lg md:text-xl font-black text-red-400 truncate">{formatBRL(metricas.custoTotal)}</p>
+             </div>
+             <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between">
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Lucro Líquido</span>
+                <p className="text-lg md:text-xl font-black text-emerald-400 truncate">{formatBRL(metricas.lucro)}</p>
+             </div>
+             <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between">
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Margem (Mk)</span>
+                <p className="text-lg md:text-xl font-black text-pink-500 truncate">{metricas.margem.toFixed(1)}%</p>
+             </div>
         </div>
 
         {loading ? (
@@ -172,6 +209,13 @@ export default function HistoricoPage() {
           <div className="space-y-3">
             {vendas.map((venda) => {
               const isExpanded = expandidoId === venda.id;
+              // Cálculo individual de custo para exibir lucro por venda (opcional, mas útil)
+              const custoVenda = venda.itens_venda.reduce((acc, item) => {
+                  const p = item.estoque?.produto;
+                  return acc + (item.quantidade * ((p?.preco_compra||0) + (p?.custo_frete||0) + (p?.custo_embalagem||0)));
+              }, 0);
+              const lucroVenda = venda.valor_liquido - custoVenda;
+
               return (
                 <div key={venda.id} className={`bg-slate-900 rounded-2xl border transition-all overflow-hidden ${isExpanded ? 'border-pink-500/50 shadow-pink-900/10 shadow-lg' : 'border-slate-800 hover:border-slate-700'}`}>
                   <button onClick={() => setExpandidoId(isExpanded ? null : venda.id)} className="w-full p-4 flex justify-between items-center text-left">
@@ -187,6 +231,7 @@ export default function HistoricoPage() {
                     </div>
                     <div className="text-right">
                       <span className="block text-lg font-black text-white">{formatBRL(venda.valor_liquido)}</span>
+                      {isExpanded && <span className="block text-[10px] font-bold text-emerald-500">Lucro: {formatBRL(lucroVenda)}</span>}
                       <span className="text-[10px] text-slate-500 uppercase font-bold">{isExpanded ? '▲ Recolher' : '▼ Detalhes'}</span>
                     </div>
                   </button>
@@ -266,7 +311,7 @@ export default function HistoricoPage() {
         </div>
       )}
 
-      {/* MODAL CONFIRMAÇÃO DE AÇÃO PERIGOSA */}
+      {/* MODAL CONFIRMAÇÃO */}
       {modalConfirmacao && (
         <div className="fixed inset-0 z-[60] bg-black/95 backdrop-blur-md flex items-center justify-center p-6 animate-in zoom-in-95 duration-200">
             <div className="bg-slate-900 w-full max-w-sm rounded-3xl border border-slate-700 p-6 shadow-2xl relative">
@@ -285,21 +330,8 @@ export default function HistoricoPage() {
                     </p>
                 </div>
                 <div className="grid grid-cols-2 gap-3 mt-8">
-                    <button 
-                        onClick={() => setModalConfirmacao(null)}
-                        className="bg-slate-800 hover:bg-slate-700 text-white py-4 rounded-xl font-bold uppercase text-xs tracking-widest transition"
-                    >
-                        Voltar
-                    </button>
-                    <button 
-                        onClick={executarAcao}
-                        disabled={processandoAcao}
-                        className={`py-4 rounded-xl font-black uppercase text-xs tracking-widest transition text-white shadow-lg ${
-                            modalConfirmacao.tipo === 'cancelar' ? 'bg-orange-600 hover:bg-orange-500' : 'bg-red-600 hover:bg-red-500'
-                        }`}
-                    >
-                        {processandoAcao ? 'Processando...' : 'Confirmar'}
-                    </button>
+                    <button onClick={() => setModalConfirmacao(null)} className="bg-slate-800 hover:bg-slate-700 text-white py-4 rounded-xl font-bold uppercase text-xs tracking-widest transition">Voltar</button>
+                    <button onClick={executarAcao} disabled={processandoAcao} className={`py-4 rounded-xl font-black uppercase text-xs tracking-widest transition text-white shadow-lg ${modalConfirmacao.tipo === 'cancelar' ? 'bg-orange-600 hover:bg-orange-500' : 'bg-red-600 hover:bg-red-500'}`}>{processandoAcao ? 'Processando...' : 'Confirmar'}</button>
                 </div>
             </div>
         </div>
