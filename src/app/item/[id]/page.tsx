@@ -185,15 +185,12 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
 
   // --- LÓGICA FINANCEIRA ---
   
-  // 1. Alterou Custo ou Preço Venda -> Recalcula Margem
   const handleMoneyInput = (val: string, field: string) => {
      const num = parseFloat(val.replace(/\D/g, '')) / 100;
      const newData = { ...formData, [field]: num || 0 };
 
      const custoTotal = newData.preco_compra + newData.custo_frete + newData.custo_embalagem;
      
-     // Se mexeu nos custos, mantemos o preço de venda e recalculamos a margem
-     // Se mexeu no preço de venda, recalculamos a margem
      const margem = custoTotal > 0 
         ? ((newData.preco_venda - custoTotal) / custoTotal) * 100 
         : 100; 
@@ -201,10 +198,9 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
      setFormData({ ...newData, margem_ganho: parseFloat(margem.toFixed(1)) });
   };
 
-  // 2. Alterou Margem -> Recalcula Preço Venda
   const handleMarginInput = (val: string) => {
       const margem = parseFloat(val);
-      if (isNaN(margem)) return setFormData({ ...formData, margem_ganho: 0 }); // Permite limpar o campo
+      if (isNaN(margem)) return setFormData({ ...formData, margem_ganho: 0 }); 
       
       const custoTotal = formData.preco_compra + formData.custo_frete + formData.custo_embalagem;
       const novoPrecoVenda = custoTotal * (1 + margem / 100);
@@ -315,45 +311,49 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                         <div className="grid grid-cols-2 gap-4">
                             <div className="space-y-1">
                                 <label className="text-[9px] font-black text-slate-500 uppercase ml-1">SKU Fornecedor</label>
-                                <input value={formData.sku_fornecedor} onChange={e => setFormData({...formData, sku_fornecedor: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" placeholder="REF-999" />
+                                {/* TEXT-BASE para evitar zoom */}
+                                <input value={formData.sku_fornecedor} onChange={e => setFormData({...formData, sku_fornecedor: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-base focus:border-pink-500 outline-none" placeholder="REF-999" />
                             </div>
                             <div className="space-y-1">
                                 <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Cor (Texto)</label>
-                                <input value={formData.cor} onChange={e => setFormData({...formData, cor: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" />
+                                {/* TEXT-BASE para evitar zoom */}
+                                <input value={formData.cor} onChange={e => setFormData({...formData, cor: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-base focus:border-pink-500 outline-none" />
                             </div>
                         </div>
 
                         <div className="space-y-1">
                              <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Descrição</label>
-                             <input value={formData.descricao} onChange={e => setFormData({...formData, descricao: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-sm focus:border-pink-500 outline-none" />
+                             {/* TEXT-BASE para evitar zoom */}
+                             <input value={formData.descricao} onChange={e => setFormData({...formData, descricao: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-base focus:border-pink-500 outline-none" />
                         </div>
 
-                        {/* CUSTOS E MARGEM */}
+                        {/* CUSTOS E MARGEM - Inputs ampliados */}
                         <div className="grid grid-cols-4 gap-2 bg-slate-950/50 p-3 rounded-xl border border-slate-800/50">
                              <div className="space-y-1">
-                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Compra</label>
-                                <input type="tel" value={formatBRL(formData.preco_compra)} onChange={e => handleMoneyInput(e.target.value, 'preco_compra')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" />
+                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1 truncate">Compra</label>
+                                {/* TEXT-BASE e p-2 para caber */}
+                                <input type="tel" value={formatBRL(formData.preco_compra)} onChange={e => handleMoneyInput(e.target.value, 'preco_compra')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-base focus:border-pink-500 outline-none" />
                              </div>
                              <div className="space-y-1">
-                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Frete</label>
-                                <input type="tel" value={formatBRL(formData.custo_frete)} onChange={e => handleMoneyInput(e.target.value, 'custo_frete')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" />
+                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1 truncate">Frete</label>
+                                <input type="tel" value={formatBRL(formData.custo_frete)} onChange={e => handleMoneyInput(e.target.value, 'custo_frete')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-base focus:border-pink-500 outline-none" />
                              </div>
                              <div className="space-y-1">
-                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Emb.</label>
-                                <input type="tel" value={formatBRL(formData.custo_embalagem)} onChange={e => handleMoneyInput(e.target.value, 'custo_embalagem')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" />
+                                <label className="text-[9px] font-black text-slate-500 uppercase ml-1 truncate">Emb.</label>
+                                <input type="tel" value={formatBRL(formData.custo_embalagem)} onChange={e => handleMoneyInput(e.target.value, 'custo_embalagem')} className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-white font-bold text-base focus:border-pink-500 outline-none" />
                              </div>
                              
-                             {/* MARGEM EDITÁVEL */}
                              <div className="space-y-1">
-                                <label className="text-[9px] font-black text-green-500 uppercase ml-1">Margem %</label>
+                                <label className="text-[9px] font-black text-green-500 uppercase ml-1 truncate">Margem %</label>
                                 <div className="relative">
                                     <input 
                                         type="number" 
                                         value={formData.margem_ganho} 
                                         onChange={e => handleMarginInput(e.target.value)} 
-                                        className="w-full bg-slate-900 p-2 rounded-lg border border-slate-700 text-green-400 font-bold text-xs focus:border-green-500 outline-none pr-6" 
+                                        // Padding right ajustado para não cobrir o %
+                                        className="w-full bg-slate-900 p-2 pr-5 rounded-lg border border-slate-700 text-green-400 font-bold text-base focus:border-green-500 outline-none" 
                                     />
-                                    <span className="absolute right-2 top-2 text-xs text-green-600 font-bold">%</span>
+                                    <span className="absolute right-1 top-2.5 text-xs text-green-600 font-bold">%</span>
                                 </div>
                              </div>
                         </div>
@@ -361,11 +361,12 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                         <div className="flex items-center gap-4 pt-2">
                              <div className="flex-1 space-y-1">
                                 <label className="text-[9px] font-black text-blue-400 uppercase ml-1">Preço Venda</label>
-                                <input type="tel" inputMode="decimal" value={formatBRL(formData.preco_venda)} onChange={e => handleMoneyInput(e.target.value, 'preco_venda')} className="w-full bg-slate-950 p-3 rounded-xl border border-blue-900/50 text-blue-400 font-black text-lg focus:border-blue-500 outline-none" />
+                                {/* TEXT-XL para destaque extra */}
+                                <input type="tel" inputMode="decimal" value={formatBRL(formData.preco_venda)} onChange={e => handleMoneyInput(e.target.value, 'preco_venda')} className="w-full bg-slate-950 p-3 rounded-xl border border-blue-900/50 text-blue-400 font-black text-xl focus:border-blue-500 outline-none" />
                              </div>
                              <div className="flex-1 space-y-1">
                                 <label className="text-[9px] font-black text-slate-500 uppercase ml-1">Fornecedor</label>
-                                <input value={formData.fornecedor} onChange={e => setFormData({...formData, fornecedor: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-xs focus:border-pink-500 outline-none" />
+                                <input value={formData.fornecedor} onChange={e => setFormData({...formData, fornecedor: e.target.value})} className="w-full bg-slate-950 p-3 rounded-xl border border-slate-700 text-white font-bold text-base focus:border-pink-500 outline-none" />
                              </div>
                         </div>
                     </>
@@ -412,12 +413,12 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
         </section>
       </main>
 
-      {/* MODAL ADICIONAR TAMANHO */}
+      {/* MODAL ADICIONAR TAMANHO - Select também ajustado para text-base */}
       {modalAddTamanho && (
           <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
               <div className="bg-slate-900 p-6 rounded-3xl w-full max-w-xs border border-slate-800 shadow-2xl">
                   <h3 className="text-center font-black text-white mb-4 uppercase text-sm tracking-widest">Novo Tamanho</h3>
-                  <select className="w-full bg-slate-950 p-4 rounded-xl border border-slate-700 text-white mb-4 outline-none text-base md:text-sm" onChange={e => setNovoTamanhoId(e.target.value)} value={novoTamanhoId}>
+                  <select className="w-full bg-slate-950 p-4 rounded-xl border border-slate-700 text-white mb-4 outline-none text-base" onChange={e => setNovoTamanhoId(e.target.value)} value={novoTamanhoId}>
                       <option value="">Selecione...</option>
                       {listaTamanhos.filter(t => !produto.estoque.find((e:any) => e.tamanho_id === t.id)).map(t => (
                           <option key={t.id} value={t.id}>{t.nome}</option>
@@ -462,7 +463,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
           </div>
       )}
 
-      {/* MODAL ESTOQUE & EAN */}
+      {/* MODAL ESTOQUE & EAN - Inputs ajustados */}
       {modalEstoque.aberto && (
           <div className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
               <div className="bg-slate-900 p-6 rounded-3xl w-full max-w-xs border border-slate-800 shadow-2xl space-y-4">
@@ -471,7 +472,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                   
                   {modalEstoque.tipo === 'edicao' ? (
                       <>
-                        <input value={modalEstoque.eanAtual} onChange={e => setModalEstoque({...modalEstoque, eanAtual: e.target.value})} className="w-full bg-slate-950 p-4 rounded-xl text-white font-mono text-center border border-slate-700 outline-none focus:border-blue-500 text-base md:text-sm" placeholder="Sem EAN" />
+                        <input value={modalEstoque.eanAtual} onChange={e => setModalEstoque({...modalEstoque, eanAtual: e.target.value})} className="w-full bg-slate-950 p-4 rounded-xl text-white font-mono text-center border border-slate-700 outline-none focus:border-blue-500 text-base" placeholder="Sem EAN" />
                         <button onClick={() => setModalEstoque({...modalEstoque, scanning: true})} className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold uppercase text-xs shadow-lg active:scale-95">📷 Ler Cód. Barras</button>
                         {modalEstoque.scanning && <div id="reader-ean-edit" className="h-48 bg-black rounded-xl overflow-hidden border-2 border-blue-500 mt-2"></div>}
                       </>
