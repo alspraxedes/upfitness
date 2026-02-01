@@ -13,19 +13,44 @@ function formatBRL(v: any) {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number.isFinite(n) ? n : 0);
 }
 
-// Extração de caminho robusta para evitar quebra de imagens
+// --- CORREÇÃO 1: Extração de Caminho Robusta para Imagens ---
 function extractPath(url: string | null) {
     if (!url) return null;
+    // Se já não for uma URL completa (assumindo que seja um caminho relativo), retorna.
     if (!url.startsWith('http')) return url;
+    
     try {
         const urlObj = new URL(url);
-        const parts = urlObj.pathname.split('/');
-        const bucketIndex = parts.findIndex(p => p === 'produtos');
-        if (bucketIndex !== -1 && parts.length > bucketIndex + 1) {
-            return decodeURIComponent(parts.slice(bucketIndex + 1).join('/'));
+        const pathName = urlObj.pathname;
+        
+        // Tenta encontrar o ponto onde começa o caminho real do arquivo após o nome do bucket.
+        // IMPORTANTE: 'produtos' deve ser o nome exato do seu bucket no Supabase.
+        const bucketName = 'produtos'; 
+        const markerPublic = `/public/${bucketName}/`;
+        const markerSign = `/${bucketName}/`;
+
+        let extractedPath = '';
+
+        if (pathName.includes(markerPublic)) {
+            extractedPath = pathName.substring(pathName.indexOf(markerPublic) + markerPublic.length);
+        } else if (pathName.includes(markerSign)) {
+            extractedPath = pathName.substring(pathName.indexOf(markerSign) + markerSign.length);
+        } else {
+             // Fallback: tenta dividir por barras se os marcadores falharem
+             const parts = pathName.split('/');
+             const bucketIndex = parts.findIndex(p => p === bucketName);
+             if (bucketIndex !== -1 && parts.length > bucketIndex + 1) {
+                 extractedPath = parts.slice(bucketIndex + 1).join('/');
+             }
         }
-        return url;
-    } catch { return url; }
+
+        // Decodifica a URL para lidar com espaços (%20) e acentos nos nomes de arquivo
+        return extractedPath ? decodeURIComponent(extractedPath) : null;
+
+    } catch (error) {
+        console.error("Erro ao extrair caminho da imagem:", url, error);
+        return null; 
+    }
 }
 
 export default function Dashboard() {
@@ -76,23 +101,33 @@ export default function Dashboard() {
     setLoading(false);
   }
 
-  // Lógica de imagens com dependência correta
   useEffect(() => {
     if (produtos.length === 0) return;
     const carregarImagens = async () => {
       const paths = new Set<string>();
+      // Filtra apenas produtos que têm URL mas ainda não foram assinados
       produtos.forEach(p => { if (p.foto_url && !signedMap[p.foto_url]) paths.add(p.foto_url); });
+      
       if (paths.size === 0) return;
       
       const updates: Record<string, string> = {};
-      await Promise.allSettled(Array.from(paths).map(async (url) => {
+      // Usa Promise.all para agilizar o processo
+      await Promise.all(Array.from(paths).map(async (url) => {
           const path = extractPath(url);
           if (path) {
-              const { data } = await supabase.storage.from('produtos').createSignedUrl(path, 3600);
-              if (data?.signedUrl) updates[url] = data.signedUrl;
+              // Tenta assinar a URL. Se o caminho estiver errado, o Supabase retorna erro, mas não quebra o app.
+              const { data, error } = await supabase.storage.from('produtos').createSignedUrl(path, 3600);
+              if (data?.signedUrl && !error) {
+                  updates[url] = data.signedUrl;
+              } else {
+                  console.warn(`Falha ao assinar imagem: ${path}`, error);
+              }
           }
       }));
-      setSignedMap(prev => ({ ...prev, ...updates }));
+      
+      if (Object.keys(updates).length > 0) {
+          setSignedMap(prev => ({ ...prev, ...updates }));
+      }
     };
     carregarImagens();
   }, [produtos, signedMap]);
@@ -103,23 +138,33 @@ export default function Dashboard() {
     return Array.from(set).sort();
   }, [produtos]);
 
+  // --- CORREÇÃO 2: Lógica de Busca Abrangente ---
   const filtrados = useMemo(() => {
-    const q = busca.toLowerCase();
+    const q = busca.toLowerCase().trim(); // Remove espaços extras
     return produtos.filter(p => {
       const total = p.estoque?.reduce((acc: number, item: any) => acc + (item.quantidade || 0), 0) || 0;
-      const matchTexto = !q || p.descricao?.toLowerCase().includes(q) || p.codigo_peca?.toLowerCase().includes(q);
+      
+      // Verifica se o termo de busca está presente em QUALQUER um dos campos principais
+      const matchTexto = !q || 
+                         p.descricao?.toLowerCase().includes(q) || 
+                         p.codigo_peca?.toLowerCase().includes(q) ||
+                         p.cor?.toLowerCase().includes(q) || // Inclui COR na busca
+                         p.sku_fornecedor?.toLowerCase().includes(q) || // Inclui SKU na busca
+                         p.fornecedor?.toLowerCase().includes(q); // Inclui FORNECEDOR na busca
+
       const matchTamanho = tamanhosSelecionados.length === 0 || p.estoque?.some((e: any) => tamanhosSelecionados.includes(e.tamanho?.nome));
       const matchFornecedor = !fornecedorSelecionado || p.fornecedor === fornecedorSelecionado;
       const matchEstoque = esconderZerados ? total > 0 : true;
+      
       return matchTexto && matchTamanho && matchFornecedor && matchEstoque;
     });
   }, [busca, produtos, tamanhosSelecionados, esconderZerados, fornecedorSelecionado]);
 
-  // Função para resetar tudo
   const resetarFiltros = () => {
     setTamanhosSelecionados([]);
     setFornecedorSelecionado('');
     setEsconderZerados(false);
+    setBusca(''); // Opcional: também limpa o campo de texto ao resetar
   };
 
   return (
@@ -149,31 +194,59 @@ export default function Dashboard() {
       </header>
 
       <main className="px-4 pt-6">
+        {/* CAMPO DE BUSCA */}
         <div className="mb-6 relative">
             <input
                 type="text"
-                placeholder="Buscar no inventário..."
-                className="w-full pl-5 pr-12 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-pink-500 transition-all shadow-lg"
+                // Placeholder atualizado para refletir a nova capacidade de busca
+                placeholder="Buscar por nome, cor, código ou marca..."
+                className="w-full pl-5 pr-12 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-pink-500 transition-all shadow-lg placeholder:text-slate-600 text-sm font-bold"
                 value={busca}
                 onChange={(e) => setBusca(e.target.value)}
             />
             <button onClick={() => setMostrarScanner(true)} className="absolute right-4 top-4 text-slate-500 text-xl">📷</button>
         </div>
 
+        {/* LISTAGEM DE PRODUTOS */}
         <div className="space-y-4">
           {loading ? (
              <div className="text-center py-20 text-slate-800 font-black animate-pulse uppercase text-xs tracking-widest">Sincronizando...</div>
+          ) : filtrados.length === 0 ? (
+             <div className="text-center py-20 text-slate-600 font-bold uppercase text-xs tracking-widest flex flex-col items-center gap-2">
+                 <span className="text-2xl">🤔</span>
+                 Nenhum item encontrado
+                 {(busca || tamanhosSelecionados.length > 0 || fornecedorSelecionado || esconderZerados) && (
+                    <button onClick={resetarFiltros} className="text-pink-500 underline mt-2">Limpar filtros</button>
+                 )}
+             </div>
           ) : (
             filtrados.map((produto) => {
+              // Verifica se temos a URL assinada no mapa
               const urlAssinada = produto.foto_url ? signedMap[produto.foto_url] : null;
               const total = produto.estoque?.reduce((acc: number, item: any) => acc + (item.quantidade || 0), 0) || 0;
+              
               return (
                 <Link href={`/item/${produto.id}`} key={produto.id} className="bg-slate-900 rounded-[2.5rem] flex overflow-hidden border border-slate-800/50 min-h-[160px] shadow-xl group active:scale-[0.98] transition-all">
                   <div className="w-36 bg-slate-950 relative border-r border-slate-800 flex-shrink-0">
+                    {/* Lógica de exibição da imagem corrigida */}
                     {urlAssinada ? (
-                        <Image src={urlAssinada} alt={produto.descricao} fill className="object-cover opacity-90 group-hover:opacity-100 transition-opacity" unoptimized />
+                        <Image 
+                            src={urlAssinada} 
+                            alt={produto.descricao} 
+                            fill 
+                            className="object-cover opacity-90 group-hover:opacity-100 transition-opacity" 
+                            unoptimized // Essencial para Supabase
+                            onError={(e) => {
+                                // Fallback visual caso a imagem falhe mesmo com a URL assinada
+                                const target = e.target as HTMLImageElement;
+                                target.style.display = 'none';
+                                target.parentElement!.innerHTML = '<div class="w-full h-full flex items-center justify-center text-slate-800 text-[10px] font-black uppercase">Erro Foto</div>';
+                            }}
+                        />
                     ) : (
-                        <div className="w-full h-full flex items-center justify-center text-slate-800 text-[10px] font-black uppercase">Sem Foto</div>
+                        <div className="w-full h-full flex items-center justify-center text-slate-800 text-[10px] font-black uppercase">
+                            {produto.foto_url ? 'Carregando...' : 'Sem Foto'}
+                        </div>
                     )}
                     <div className={`absolute bottom-4 left-4 px-2.5 py-1 rounded-lg font-black text-[10px] shadow-2xl ${total > 0 ? 'bg-emerald-500 text-white' : 'bg-red-600 text-white'}`}>{total} UN</div>
                   </div>
@@ -254,7 +327,6 @@ export default function Dashboard() {
                     <button onClick={() => setMostrarFiltros(false)} className="w-full bg-gradient-to-r from-pink-600 to-blue-600 text-white py-5 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl shadow-pink-500/20">
                         Confirmar Filtros
                     </button>
-                    {/* BOTÃO RESET SOLICITADO */}
                     <button onClick={resetarFiltros} className="w-full py-4 rounded-[2rem] border border-slate-800 text-slate-500 font-black text-[10px] uppercase tracking-widest hover:bg-slate-800/30 transition-colors">
                         Limpar Tudo
                     </button>
