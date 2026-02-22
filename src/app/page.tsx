@@ -3,7 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
 import Image from 'next/image';
 import { getSignedUrlCached } from '../lib/signedUrlCache';
@@ -52,7 +52,6 @@ type Anchor = { id: string; top: number };
 
 export default function Dashboard() {
   const router = useRouter();
-  const searchParams = useSearchParams();
 
   const [produtos, setProdutos] = useState<any[]>([]);
   const [signedMap, setSignedMap] = useState<Record<string, string>>({});
@@ -115,25 +114,30 @@ export default function Dashboard() {
   }, []);
 
   // --- 1) Inicializa filtros a partir da URL (querystring) ---
-  useEffect(() => {
-    const q = searchParams.get('q') ?? '';
-    const sizesRaw = searchParams.get('sizes') ?? '';
-    const brand = searchParams.get('brand') ?? '';
-    const hideZero = searchParams.get('hideZero') === '1';
+// ✅ sem useSearchParams (evita exigência de Suspense no build)
+useEffect(() => {
+  // garante client-only
+  if (typeof window === 'undefined') return;
 
-    const sizes = sizesRaw
-      ? sizesRaw
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [];
+  const sp = new URLSearchParams(window.location.search);
 
-    setBusca(q);
-    setFornecedorSelecionado(brand);
-    setEsconderZerados(hideZero);
-    setTamanhosSelecionados(sizes);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const q = sp.get('q') ?? '';
+  const sizesRaw = sp.get('sizes') ?? '';
+  const brand = sp.get('brand') ?? '';
+  const hideZero = sp.get('hideZero') === '1';
+
+  const sizes = sizesRaw
+    ? sizesRaw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
+  setBusca(q);
+  setFornecedorSelecionado(brand);
+  setEsconderZerados(hideZero);
+  setTamanhosSelecionados(sizes);
+}, []);
 
   // --- 2) Mantém URL sincronizada com filtros/busca ---
   useEffect(() => {
@@ -153,6 +157,13 @@ export default function Dashboard() {
     } catch {}
 
     const href = qs ? `/?${qs}` : '/';
+
+      // ✅ evita replace repetido do mesmo href
+  if (typeof window !== 'undefined') {
+    const current = window.location.pathname + window.location.search;
+    if (current === href) return;
+  }
+
     router.replace(href);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busca, tamanhosSelecionados, fornecedorSelecionado, esconderZerados]);
