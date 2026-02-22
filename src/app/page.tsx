@@ -540,7 +540,7 @@ useEffect(() => {
             <input
               type="text"
               placeholder="Buscar por nome, cor, código ou marca..."
-              className="w-full pl-5 pr-12 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-pink-500 transition-all shadow-lg placeholder:text-slate-600 text-sm font-bold"
+              className="w-full pl-5 pr-12 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-pink-500 transition-all shadow-lg placeholder:text-slate-600 text-base font-bold"
               value={busca}
               onChange={(e) => setBusca(e.target.value)}
             />
