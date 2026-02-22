@@ -7,7 +7,6 @@ import { Html5Qrcode } from 'html5-qrcode';
 import Cropper from 'react-easy-crop';
 import { useSearchParams } from 'next/navigation';
 
-// IMPORTANTE: Verifique se o caminho do componente está correto
 import ReciboModal from '../components/ReciboModal';
 
 // --- TIPOS ---
@@ -48,6 +47,26 @@ type ItemCarrinho = {
 };
 
 type AreaCrop = { x: number; y: number; width: number; height: number };
+
+type DraftResumo = {
+  id: string;
+  titulo: string | null;
+  updated_at: string;
+  created_at: string;
+};
+
+type DraftItemDB = {
+  produto_id: string;
+  estoque_id: string;
+  descricao: string;
+  cor: string | null;
+  tamanho: string | null;
+  preco: number;
+  custo: number;
+  qtd: number;
+  foto_url: string | null;
+  ean: string | null;
+};
 
 // --- UTILITÁRIOS ---
 const formatBRL = (val: number) => val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -133,9 +152,23 @@ function VendaPageInner() {
   const [produtos, setProdutos] = useState<Produto[]>([]);
   const [busca, setBusca] = useState('');
 
+  // URLs assinadas (normal) e thumbnails (transformadas)
   const [signedMap, setSignedMap] = useState<Record<string, string>>({});
+  const [thumbMap, setThumbMap] = useState<Record<string, string>>({});
+
   const [abaMobile, setAbaMobile] = useState<'busca' | 'carrinho'>('busca');
   const [carrinho, setCarrinho] = useState<ItemCarrinho[]>([]);
+
+  // Drafts
+  const [draftAtualId, setDraftAtualId] = useState<string | null>(null);
+  const [draftAtualTitulo, setDraftAtualTitulo] = useState<string>('');
+  const [drafts, setDrafts] = useState<DraftResumo[]>([]);
+  const [mostrarDrafts, setMostrarDrafts] = useState(false);
+
+  // Expand no modal de drafts (pré-visualizar itens)
+  const [draftExpanded, setDraftExpanded] = useState<Record<string, boolean>>({});
+  const [draftItemsCache, setDraftItemsCache] = useState<Record<string, DraftItemDB[]>>({});
+  const [draftItemsLoading, setDraftItemsLoading] = useState<Record<string, boolean>>({});
 
   // Modais e Recibo
   const [modalSelecao, setModalSelecao] = useState<Produto | null>(null);
@@ -164,47 +197,138 @@ function VendaPageInner() {
   const scannerRef = useRef<Html5Qrcode | null>(null);
 
   useEffect(() => {
-    fetchProdutos();
+    (async () => {
+      await fetchProdutos();
+      await fetchDrafts();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Assinatura de Fotos (para bucket privado)
+  const produtosFiltrados = useMemo(() => {
+    const q = busca.toLowerCase().trim();
+    if (!q) return [];
+
+    return produtos
+      .filter((p) => {
+        const matchTexto =
+          (p.descricao || '').toLowerCase().includes(q) ||
+          (p.codigo_peca || '').toLowerCase().includes(q) ||
+          (p.sku_fornecedor || '').toLowerCase().includes(q);
+
+        const matchEan = p.estoque.some((e) => e.codigo_barras?.includes(q));
+        if (!matchTexto && !matchEan) return false;
+
+        const totalEstoque = p.estoque.reduce((acc, est) => acc + est.quantidade, 0);
+        return totalEstoque > 0;
+      })
+      .slice(0, 6);
+  }, [busca, produtos]);
+
+  // ===== Thumbs (Supabase Image Transformations) =====
+  const THUMB_TRANSFORM_BUSCA = useMemo(
+    () => ({
+      width: 64,
+      height: 64,
+      resize: 'cover' as const,
+      quality: 35,
+    }),
+    []
+  );
+
+  const THUMB_TRANSFORM_MODAL = useMemo(
+    () => ({
+      width: 180,
+      height: 180,
+      resize: 'cover' as const,
+      quality: 45,
+    }),
+    []
+  );
+
+  // ===== Assinatura de fotos (normal + thumbs) =====
   useEffect(() => {
     (async () => {
-      const pathsToSign = new Set<string>();
-
+      // NORMAL (qualidade original): carrinho + modais maiores (recibo/confirm)
+      const normalToSign = new Set<string>();
       carrinho.forEach((item) => {
-        if (item.foto && !signedMap[item.foto]) pathsToSign.add(item.foto);
+        if (item.foto && !signedMap[item.foto]) normalToSign.add(item.foto);
+      });
+      if (modalSelecao?.foto_url && !signedMap[modalSelecao.foto_url]) normalToSign.add(modalSelecao.foto_url);
+      if (itemPendente?.produto.foto_url && !signedMap[itemPendente.produto.foto_url]) normalToSign.add(itemPendente.produto.foto_url);
+
+      // THUMBS da busca (bem leves)
+      const thumbsBuscaToSign = new Set<string>();
+      produtosFiltrados.forEach((p) => {
+        if (p.foto_url && !thumbMap[p.foto_url]) thumbsBuscaToSign.add(p.foto_url);
       });
 
-      if (modalSelecao?.foto_url && !signedMap[modalSelecao.foto_url]) pathsToSign.add(modalSelecao.foto_url);
-      if (itemPendente?.produto.foto_url && !signedMap[itemPendente.produto.foto_url]) pathsToSign.add(itemPendente.produto.foto_url);
+      // THUMB do modal de seleção (também leve, mas maior)
+      const thumbsModalToSign = new Set<string>();
+      if (modalSelecao?.foto_url && !thumbMap[modalSelecao.foto_url]) thumbsModalToSign.add(modalSelecao.foto_url);
 
-      if (pathsToSign.size === 0) return;
+      if (normalToSign.size === 0 && thumbsBuscaToSign.size === 0 && thumbsModalToSign.size === 0) return;
 
-      const newSigned: Record<string, string> = {};
-      for (const original of Array.from(pathsToSign)) {
-        const path = extractPath(original);
-        if (path) {
+      if (normalToSign.size > 0) {
+        const newSigned: Record<string, string> = {};
+        for (const original of Array.from(normalToSign)) {
+          const path = extractPath(original);
+          if (!path) continue;
           const { data } = await supabase.storage.from('produtos').createSignedUrl(path, 3600);
           if (data?.signedUrl) newSigned[original] = data.signedUrl;
         }
+        if (Object.keys(newSigned).length > 0) setSignedMap((prev) => ({ ...prev, ...newSigned }));
       }
 
-      if (Object.keys(newSigned).length > 0) setSignedMap((prev) => ({ ...prev, ...newSigned }));
+      // thumbs busca
+      if (thumbsBuscaToSign.size > 0) {
+        const newThumbs: Record<string, string> = {};
+        for (const original of Array.from(thumbsBuscaToSign)) {
+          const path = extractPath(original);
+          if (!path) continue;
+
+          const { data } = await supabase.storage.from('produtos').createSignedUrl(path, 3600, {
+            transform: THUMB_TRANSFORM_BUSCA,
+          });
+
+          if (data?.signedUrl) newThumbs[original] = data.signedUrl;
+        }
+        if (Object.keys(newThumbs).length > 0) setThumbMap((prev) => ({ ...prev, ...newThumbs }));
+      }
+
+      // thumb modal (se necessário, sobrescreve a mesma chave com outra URL transformada maior)
+      if (thumbsModalToSign.size > 0) {
+        const newThumbs: Record<string, string> = {};
+        for (const original of Array.from(thumbsModalToSign)) {
+          const path = extractPath(original);
+          if (!path) continue;
+
+          const { data } = await supabase.storage.from('produtos').createSignedUrl(path, 3600, {
+            transform: THUMB_TRANSFORM_MODAL,
+          });
+
+          if (data?.signedUrl) newThumbs[original] = data.signedUrl;
+        }
+        if (Object.keys(newThumbs).length > 0) setThumbMap((prev) => ({ ...prev, ...newThumbs }));
+      }
     })();
-  }, [carrinho, modalSelecao, itemPendente, signedMap]);
+  }, [
+    carrinho,
+    modalSelecao,
+    itemPendente,
+    produtosFiltrados,
+    signedMap,
+    thumbMap,
+    THUMB_TRANSFORM_BUSCA,
+    THUMB_TRANSFORM_MODAL,
+  ]);
 
   // Recalcula valor final conforme desconto
   useEffect(() => {
     const totalBrutoCalc = carrinho.reduce((acc, item) => acc + item.preco * item.qtd, 0);
     let final = totalBrutoCalc;
 
-    if (pagamento.descontoTipo === 'reais') {
-      final = totalBrutoCalc - pagamento.descontoValor;
-    } else {
-      final = totalBrutoCalc - totalBrutoCalc * (pagamento.descontoValor / 100);
-    }
+    if (pagamento.descontoTipo === 'reais') final = totalBrutoCalc - pagamento.descontoValor;
+    else final = totalBrutoCalc - totalBrutoCalc * (pagamento.descontoValor / 100);
 
     setPagamento((prev) => ({ ...prev, valorFinal: Math.max(0, final) }));
   }, [carrinho, pagamento.descontoTipo, pagamento.descontoValor]);
@@ -251,8 +375,8 @@ function VendaPageInner() {
     setMostrarScanner(false);
   };
 
-  async function fetchProdutos() {
-    const { data } = await supabase
+  async function fetchProdutos(): Promise<Produto[]> {
+    const { data, error } = await supabase
       .from('produtos')
       .select(
         `
@@ -263,7 +387,48 @@ function VendaPageInner() {
       )
       .eq('descontinuado', false);
 
-    if (data) setProdutos(data as any);
+    if (error) {
+      console.log('Erro ao buscar produtos:', error.message);
+      return produtos;
+    }
+
+    const list = (data ?? []) as any as Produto[];
+    setProdutos(list);
+    return list;
+  }
+
+  async function fetchDrafts() {
+    const { data, error } = await supabase
+      .from('venda_drafts')
+      .select('id, titulo, updated_at, created_at')
+      .order('updated_at', { ascending: false })
+      .limit(30);
+
+    if (error) {
+      console.log('Erro ao listar drafts:', error.message);
+      return;
+    }
+    setDrafts((data ?? []) as any);
+  }
+
+  async function fetchDraftItemsPreview(draftId: string) {
+    if (draftItemsCache[draftId]) return;
+
+    setDraftItemsLoading((prev) => ({ ...prev, [draftId]: true }));
+    try {
+      const { data, error } = await supabase
+        .from('venda_draft_itens')
+        .select('produto_id, estoque_id, descricao, cor, tamanho, preco, custo, qtd, foto_url, ean')
+        .eq('draft_id', draftId);
+
+      if (error) throw new Error(error.message);
+
+      setDraftItemsCache((prev) => ({ ...prev, [draftId]: (data ?? []) as DraftItemDB[] }));
+    } catch (e: any) {
+      alert(`Erro ao carregar itens do rascunho: ${e?.message ?? e}`);
+    } finally {
+      setDraftItemsLoading((prev) => ({ ...prev, [draftId]: false }));
+    }
   }
 
   function buscarPorEAN(codigo: string) {
@@ -310,7 +475,8 @@ function VendaPageInner() {
         prev.map((item) => (item.estoque_id === est.id ? { ...item, qtd: item.qtd + 1 } : item))
       );
     } else {
-      const custoTotalItem = (produto.preco_compra || 0) + (produto.custo_frete || 0) + (produto.custo_embalagem || 0);
+      const custoTotalItem =
+        (produto.preco_compra || 0) + (produto.custo_frete || 0) + (produto.custo_embalagem || 0);
 
       const novoItem: ItemCarrinho = {
         tempId: Math.random().toString(36),
@@ -373,26 +539,6 @@ function VendaPageInner() {
     }
   };
 
-  const produtosFiltrados = useMemo(() => {
-    const q = busca.toLowerCase().trim();
-    if (!q) return [];
-
-    return produtos
-      .filter((p) => {
-        const matchTexto =
-          (p.descricao || '').toLowerCase().includes(q) ||
-          (p.codigo_peca || '').toLowerCase().includes(q) ||
-          (p.sku_fornecedor || '').toLowerCase().includes(q);
-
-        const matchEan = p.estoque.some((e) => e.codigo_barras?.includes(q));
-        if (!matchTexto && !matchEan) return false;
-
-        const totalEstoque = p.estoque.reduce((acc, est) => acc + est.quantidade, 0);
-        return totalEstoque > 0;
-      })
-      .slice(0, 6);
-  }, [busca, produtos]);
-
   function removerItem(tempId: string) {
     setCarrinho((prev) => prev.filter((i) => i.tempId !== tempId));
   }
@@ -403,7 +549,7 @@ function VendaPageInner() {
         if (item.tempId === tempId) {
           const novaQtd = item.qtd + delta;
           if (novaQtd < 1) return item;
-          if (novaQtd > item.maxEstoque) return item;
+          if (delta > 0 && novaQtd > item.maxEstoque) return item;
           return { ...item, qtd: novaQtd };
         }
         return item;
@@ -414,14 +560,225 @@ function VendaPageInner() {
   const totalBruto = carrinho.reduce((acc, item) => acc + item.preco * item.qtd, 0);
   const qtdItensCarrinho = carrinho.reduce((acc, item) => acc + item.qtd, 0);
 
+  const itensZerados = useMemo(() => carrinho.filter((i) => (i.maxEstoque ?? 0) <= 0), [carrinho]);
+  const temZerados = itensZerados.length > 0;
+
+  function bloquearFechamentoSeZerados() {
+    if (!temZerados) return false;
+    const lista = itensZerados
+      .slice(0, 6)
+      .map((i) => `• ${i.descricao} (${i.cor} • ${i.tamanho})`)
+      .join('\n');
+    alert(
+      `Existem itens no carrinho com ESTOQUE ZERADO.\n\nRemova os itens zerados antes de fechar a venda.\n\nItens:\n${lista}${
+        itensZerados.length > 6 ? `\n• ... (+${itensZerados.length - 6})` : ''
+      }`
+    );
+    return true;
+  }
+
   function abrirModalPagamento() {
     if (carrinho.length === 0) return alert('Carrinho vazio.');
+    if (bloquearFechamentoSeZerados()) return;
+
     setPagamento({ metodo: 'pix', parcelas: 1, descontoTipo: 'reais', descontoValor: 0, valorFinal: totalBruto });
     setModalPagamento(true);
   }
 
+  // -------- DRAFTS: salvar / carregar / excluir --------
+  function tituloPadraoDraft() {
+    const d = new Date();
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `Carrinho ${dd}/${mm} ${hh}:${mi}`;
+  }
+
+  async function salvarDraft() {
+    if (carrinho.length === 0) return alert('Carrinho vazio.');
+
+    const isEditando = !!draftAtualId;
+    let tituloFinal = draftAtualTitulo?.trim();
+
+    if (!isEditando) {
+      const titulo = window.prompt('Nome do carrinho salvo:', '') ?? '';
+      tituloFinal = titulo.trim() || tituloPadraoDraft();
+    } else {
+      if (!tituloFinal) tituloFinal = tituloPadraoDraft();
+    }
+
+    setLoading(true);
+    try {
+      let draftId = draftAtualId;
+
+      if (!draftId) {
+        const { data: created, error: errCreate } = await supabase
+          .from('venda_drafts')
+          .insert([{ titulo: tituloFinal }])
+          .select('id')
+          .single();
+
+        if (errCreate) throw new Error(errCreate.message);
+        draftId = created?.id as string;
+        setDraftAtualId(draftId);
+        setDraftAtualTitulo(tituloFinal);
+      } else {
+        const { error: errUpd } = await supabase.from('venda_drafts').update({ titulo: tituloFinal }).eq('id', draftId);
+        if (errUpd) throw new Error(errUpd.message);
+        setDraftAtualTitulo(tituloFinal);
+      }
+
+      const { error: errDel } = await supabase.from('venda_draft_itens').delete().eq('draft_id', draftId);
+      if (errDel) throw new Error(errDel.message);
+
+      const itens = carrinho.map((i) => ({
+        draft_id: draftId,
+        produto_id: i.produto_id,
+        estoque_id: i.estoque_id,
+        descricao: i.descricao,
+        cor: i.cor,
+        tamanho: i.tamanho,
+        preco: i.preco,
+        custo: i.custo,
+        qtd: i.qtd,
+        foto_url: i.foto,
+        ean: i.ean,
+      }));
+
+      const { error: errIns } = await supabase.from('venda_draft_itens').insert(itens);
+      if (errIns) throw new Error(errIns.message);
+
+      await fetchDrafts();
+      alert(isEditando ? 'Carrinho atualizado.' : 'Carrinho salvo.');
+
+      // invalida preview cache desse draft (pra refletir mudanças)
+      if (draftId) {
+        setDraftItemsCache((prev) => {
+          const cp = { ...prev };
+          delete cp[draftId];
+          return cp;
+        });
+      }
+    } catch (e: any) {
+      alert(`Erro ao salvar carrinho: ${e?.message ?? e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function carregarDraft(draftId: string, draftTitulo?: string | null) {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('venda_draft_itens')
+        .select('produto_id, estoque_id, descricao, cor, tamanho, preco, custo, qtd, foto_url, ean')
+        .eq('draft_id', draftId);
+
+      if (error) throw new Error(error.message);
+
+      const items = (data ?? []) as DraftItemDB[];
+      const produtosAtualizados = await fetchProdutos();
+
+      const novoCarrinho: ItemCarrinho[] = items.map((it) => {
+        const p = produtosAtualizados.find((pp) => pp.id === it.produto_id);
+        const est = p?.estoque?.find((ee) => ee.id === it.estoque_id);
+        const maxEstoque = est?.quantidade ?? 0;
+
+        return {
+          tempId: Math.random().toString(36),
+          produto_id: it.produto_id,
+          estoque_id: it.estoque_id,
+          descricao: it.descricao,
+          cor: it.cor ?? '',
+          tamanho: it.tamanho ?? '',
+          preco: Number(it.preco) || 0,
+          custo: Number(it.custo) || 0,
+          qtd: Math.max(1, Number(it.qtd) || 1),
+          maxEstoque,
+          foto: it.foto_url,
+          ean: it.ean,
+        };
+      });
+
+      setCarrinho(novoCarrinho);
+      setDraftAtualId(draftId);
+      setDraftAtualTitulo((draftTitulo ?? drafts.find((d) => d.id === draftId)?.titulo ?? 'Carrinho salvo').trim());
+
+      setMostrarDrafts(false);
+      setAbaMobile('carrinho');
+
+      const zerados = novoCarrinho.filter((i) => (i.maxEstoque ?? 0) <= 0);
+      if (zerados.length > 0) {
+        const lista = zerados
+          .slice(0, 6)
+          .map((i) => `• ${i.descricao} (${i.cor} • ${i.tamanho})`)
+          .join('\n');
+
+        alert(
+          `Carrinho carregado, mas existem itens com ESTOQUE ZERADO.\n\nEles foram mantidos no carrinho para você visualizar, porém você precisa removê-los antes de fechar a venda.\n\nItens:\n${lista}${
+            zerados.length > 6 ? `\n• ... (+${zerados.length - 6})` : ''
+          }`
+        );
+      }
+    } catch (e: any) {
+      alert(`Erro ao carregar carrinho: ${e?.message ?? e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function excluirDraft(draftId: string) {
+    if (!confirm('Excluir este carrinho salvo?')) return;
+
+    setLoading(true);
+    try {
+      const { error } = await supabase.from('venda_drafts').delete().eq('id', draftId);
+      if (error) throw new Error(error.message);
+
+      if (draftAtualId === draftId) {
+        setDraftAtualId(null);
+        setDraftAtualTitulo('');
+      }
+      await fetchDrafts();
+
+      setDraftItemsCache((prev) => {
+        const cp = { ...prev };
+        delete cp[draftId];
+        return cp;
+      });
+      setDraftExpanded((prev) => {
+        const cp = { ...prev };
+        delete cp[draftId];
+        return cp;
+      });
+    } catch (e: any) {
+      alert(`Erro ao excluir: ${e?.message ?? e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function limparCarrinho() {
+    if (carrinho.length === 0 && !draftAtualId) return;
+
+    const msg =
+      carrinho.length === 0 && draftAtualId
+        ? 'Limpar o rascunho atual (desvincular do carrinho) ?'
+        : 'Limpar carrinho atual?';
+
+    if (!confirm(msg)) return;
+
+    setCarrinho([]);
+    setDraftAtualId(null);
+    setDraftAtualTitulo('');
+    setAbaMobile('busca');
+  }
+
   // --- CONFIRMAR VENDA ---
   async function confirmarVenda() {
+    if (bloquearFechamentoSeZerados()) return;
+
     setLoading(true);
 
     const itensPayload = carrinho.map((i) => ({
@@ -449,7 +806,13 @@ function VendaPageInner() {
       return;
     }
 
-    // SUCESSO: PREPARA O RECIBO E LIMPA O CARRINHO
+    if (draftAtualId) {
+      await supabase.from('venda_drafts').delete().eq('id', draftAtualId);
+      setDraftAtualId(null);
+      setDraftAtualTitulo('');
+      await fetchDrafts();
+    }
+
     const dadosParaRecibo = {
       itens: carrinho.map((i) => ({
         descricao: i.descricao,
@@ -476,7 +839,11 @@ function VendaPageInner() {
     const num = parseFloat(valor) || 0;
     if (tipo === 'final') {
       const descontoEmReais = totalBruto - num;
-      setPagamento((prev) => ({ ...prev, descontoTipo: 'reais', descontoValor: parseFloat(descontoEmReais.toFixed(2)) }));
+      setPagamento((prev) => ({
+        ...prev,
+        descontoTipo: 'reais',
+        descontoValor: parseFloat(descontoEmReais.toFixed(2)),
+      }));
     } else {
       setPagamento((prev) => ({ ...prev, descontoTipo: tipo, descontoValor: num }));
     }
@@ -487,25 +854,70 @@ function VendaPageInner() {
     setBusca('');
   };
 
+  const isEditandoDraft = !!draftAtualId;
+
+  const bgClass = isEditandoDraft
+    ? 'bg-gradient-to-br from-orange-950 via-amber-950 to-slate-950'
+    : 'bg-slate-950';
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col md:flex-row overflow-hidden relative">
+    <div className={`min-h-screen ${bgClass} text-slate-100 font-sans flex flex-col md:flex-row overflow-hidden relative`}>
+      {/* FUNDO / MARCA D’ÁGUA PARA EDIÇÃO DE CARRINHO SALVO */}
+      {isEditandoDraft && (
+        <div className="pointer-events-none absolute inset-0 z-0">
+          <div className="absolute inset-0 opacity-[0.10]">
+            
+          </div>
+        </div>
+      )}
+
       <div id="reader-hidden" className="hidden"></div>
 
       {/* ÁREA ESQUERDA: BUSCA */}
       <div
-        className={`flex-1 p-4 md:p-6 flex flex-col gap-4 h-[calc(100vh-80px)] md:h-screen overflow-y-auto ${
+        className={`relative z-10 flex-1 p-4 md:p-6 flex flex-col gap-4 h-[calc(100vh-80px)] md:h-screen overflow-y-auto ${
           abaMobile === 'carrinho' ? 'hidden md:flex' : 'flex'
         }`}
       >
         <header className="flex items-center gap-4">
-          {/* VOLTAR mantendo querystring */}
           <Link href={`/${dashQS}`} className="bg-slate-800 p-3 rounded-full hover:bg-slate-700 transition active:scale-95">
             ←
           </Link>
           <h1 className="font-black italic text-xl uppercase">
             UpFitness <span className="font-light text-pink-500">Checkout</span>
           </h1>
+
+          {isEditandoDraft && (
+            <span className="ml-auto bg-orange-600 text-white text-[10px] px-3 py-1 rounded-full font-black uppercase tracking-widest border border-orange-300/30 shadow">
+              MODO EDIÇÃO
+            </span>
+          )}
         </header>
+
+        {isEditandoDraft && (
+          <div className="bg-orange-900/35 border border-orange-500/40 rounded-2xl p-4 shadow-[0_0_0_1px_rgba(0,0,0,0.2)]">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[10px] font-black uppercase tracking-widest text-orange-200">
+                  Você está editando um carrinho salvo
+                </p>
+                <p className="text-white font-black truncate">{draftAtualTitulo || 'Carrinho salvo'}</p>
+                {temZerados && (
+                  <p className="mt-2 text-[11px] font-bold text-red-200">
+                    Atenção: existem itens com <span className="font-black">ESTOQUE ZERADO</span>. Remova-os para fechar a
+                    venda.
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={limparCarrinho}
+                className="shrink-0 text-[10px] font-black uppercase text-red-200 hover:text-white bg-red-950/30 border border-red-900/30 px-3 py-2 rounded-xl active:scale-95"
+              >
+                Sair da edição
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="relative z-30 flex flex-col gap-3">
           <input
@@ -536,23 +948,39 @@ function VendaPageInner() {
             </label>
           </div>
 
+          {/* LISTA DE RESULTADOS COM THUMBNAILS (BAIXA RESOLUÇÃO/QUALIDADE) */}
           {produtosFiltrados.length > 0 && busca.length > 0 && (
             <div className="absolute top-full left-0 right-0 mt-2 bg-slate-800 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden z-50 max-h-[50vh] overflow-y-auto">
-              {produtosFiltrados.map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => handleSelecionarProduto(p)}
-                  className="w-full text-left p-5 hover:bg-slate-700 border-b border-slate-700/50 last:border-0 flex justify-between items-center transition-colors active:bg-slate-600"
-                >
-                  <div>
-                    <p className="font-bold text-white text-sm uppercase">{p.descricao}</p>
-                    <p className="text-[10px] font-mono text-slate-400">
-                      {p.codigo_peca} | {p.cor}
-                    </p>
-                  </div>
-                  <span className="font-black text-emerald-400 text-sm">{formatBRL(p.preco_venda)}</span>
-                </button>
-              ))}
+              {produtosFiltrados.map((p) => {
+                const thumbUrl = p.foto_url ? thumbMap[p.foto_url] : null;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => handleSelecionarProduto(p)}
+                    className="w-full text-left p-4 hover:bg-slate-700 border-b border-slate-700/50 last:border-0 flex justify-between items-center transition-colors active:bg-slate-600 gap-4"
+                  >
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div className="w-12 h-12 rounded-xl bg-slate-900 border border-slate-700 overflow-hidden flex items-center justify-center flex-shrink-0">
+                        {thumbUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={thumbUrl} className="w-full h-full object-cover" alt="" loading="eager" decoding="async" />
+                        ) : (
+                          <span className="text-lg opacity-60">📷</span>
+                        )}
+                      </div>
+
+                      <div className="min-w-0">
+                        <p className="font-bold text-white text-sm uppercase truncate">{p.descricao}</p>
+                        <p className="text-[10px] font-mono text-slate-400 truncate">
+                          {p.codigo_peca} | {p.cor}
+                        </p>
+                      </div>
+                    </div>
+
+                    <span className="font-black text-emerald-400 text-sm whitespace-nowrap">{formatBRL(p.preco_venda)}</span>
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
@@ -583,88 +1011,385 @@ function VendaPageInner() {
 
       {/* ÁREA DIREITA: CARRINHO */}
       <div
-        className={`w-full md:w-[420px] bg-slate-900 md:border-l border-slate-800 flex flex-col h-screen md:sticky md:top-0 shadow-2xl z-20 ${
-          abaMobile === 'busca' ? 'hidden md:flex' : 'flex fixed inset-0'
-        }`}
-      >
-        <div className="p-6 bg-slate-950/95 backdrop-blur-md border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button onClick={() => setAbaMobile('busca')} className="md:hidden bg-slate-800 p-2 rounded-full text-slate-300">
-              ←
+  className={`relative z-10 w-full md:w-[420px] md:border-l flex flex-col h-screen md:sticky md:top-0 shadow-2xl ${
+    abaMobile === 'busca' ? 'hidden md:flex' : 'flex fixed inset-0'
+  } ${isEditandoDraft ? 'border-orange-800/50' : 'border-slate-800'}`}
+>
+{isEditandoDraft ? (
+    <>
+      <div className="absolute inset-0 z-0 bg-gradient-to-br from-orange-950 via-amber-950 to-slate-950" />
+      <div className="pointer-events-none absolute inset-0 z-0">
+        <div className="absolute inset-0 opacity-[0.10]">
+          
+        </div>
+        
+      </div>
+    </>
+  ) : (
+    <div className="absolute inset-0 z-0 bg-slate-900" />
+  )}
+       {/* CONTEÚDO DO CARRINHO */}
+  <div className="relative z-10 flex flex-col h-full">
+    <div className="p-6 bg-slate-950/95 backdrop-blur-md border-b border-slate-800 flex items-center justify-between">
+      <div className="flex items-center gap-3">
+        <button onClick={() => setAbaMobile('busca')} className="md:hidden bg-slate-800 p-2 rounded-full text-slate-300">
+          ←
+        </button>
+        <h2 className="font-black text-xl uppercase tracking-widest flex items-center gap-2">
+          Carrinho <span className="bg-pink-600 text-white text-xs px-2 py-0.5 rounded-full">{qtdItensCarrinho}</span>
+        </h2>
+
+        {isEditandoDraft && (
+          <span className="ml-2 bg-orange-600 text-white text-[10px] px-3 py-1 rounded-full font-black uppercase tracking-widest border border-orange-300/30 shadow">
+            MODO EDIÇÃO
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          disabled={loading}
+          onClick={() => {
+            setMostrarDrafts(true);
+            fetchDrafts();
+          }}
+          className="bg-slate-800 hover:bg-slate-700 text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border border-slate-700 active:scale-95"
+          title="Carrinhos salvos"
+        >
+          📂
+        </button>
+        <button
+          disabled={loading || carrinho.length === 0}
+          onClick={salvarDraft}
+          className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border border-blue-400/30 active:scale-95 disabled:opacity-50"
+          title={isEditandoDraft ? 'Atualizar carrinho salvo' : 'Salvar carrinho'}
+        >
+          💾
+        </button>
+      </div>
+    </div>
+ 
+          {/* Banner (mesmo estilo do checkout em modo edição) */}
+    {isEditandoDraft && (
+      <div className="px-4 pt-3">
+        <div className="bg-orange-900/35 border border-orange-500/40 rounded-2xl p-4 shadow-[0_0_0_1px_rgba(0,0,0,0.2)]">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] font-black uppercase tracking-widest text-orange-200">
+                Você está editando um carrinho salvo
+              </p>
+              <p className="text-white font-black truncate">{draftAtualTitulo || 'Carrinho salvo'}</p>
+              {temZerados && (
+                <p className="mt-2 text-[11px] font-bold text-red-200">
+                  Atenção: existem itens com <span className="font-black">ESTOQUE ZERADO</span>. Remova-os para fechar a venda.
+                </p>
+              )}
+            </div>
+
+            <button
+              onClick={limparCarrinho}
+              className="shrink-0 text-[10px] font-black uppercase text-red-200 hover:text-white bg-red-950/30 border border-red-900/30 px-3 py-2 rounded-xl active:scale-95"
+            >
+              Sair da edição
             </button>
-            <h2 className="font-black text-xl uppercase tracking-widest flex items-center gap-2">
-              Carrinho <span className="bg-pink-600 text-white text-xs px-2 py-0.5 rounded-full">{qtdItensCarrinho}</span>
-            </h2>
           </div>
         </div>
+      </div>
+    )}
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-950/30">
-          {carrinho.map((item) => (
-            <div
-              key={item.tempId}
-              className="bg-slate-900 p-3 rounded-2xl border border-slate-800 flex gap-3 relative group hover:border-slate-600 transition-colors shadow-sm"
-            >
-              <div className="w-16 h-16 rounded-xl bg-slate-800 overflow-hidden border border-slate-700 flex-shrink-0">
-                {item.foto && signedMap[item.foto] ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={signedMap[item.foto]} className="w-full h-full object-cover" alt="" />
+   {/* Indicador padrão (quando não está em edição) */}
+   {!isEditandoDraft && (draftAtualId || carrinho.length > 0) && (
+      <div className="px-4 pt-3">
+        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3 flex items-center justify-between gap-3">
+          <div className="min-w-0 text-[10px] text-slate-400 font-bold uppercase">
+            {draftAtualId ? (
+              <>
+                Editando: <span className="text-white font-black truncate">{draftAtualTitulo || 'Carrinho salvo'}</span>
+                {temZerados && (
+                  <span className="ml-2 inline-flex items-center gap-1 bg-red-950/30 border border-red-900/30 text-red-200 px-2 py-0.5 rounded-lg">
+                    ⚠ estoque zerado
+                  </span>
+                )}
+              </>
+            ) : (
+              <>Carrinho novo (não salvo)</>
+            )}
+          </div>
+          <button
+            onClick={limparCarrinho}
+            className="shrink-0 text-[10px] font-black uppercase text-red-400 hover:text-red-300 bg-red-950/20 border border-red-900/30 px-3 py-1.5 rounded-xl active:scale-95"
+          >
+            Limpar
+          </button>
+        </div>
+      </div>
+    )}
+        
+        {temZerados && (
+      <div className="px-4 pt-3">
+        <div className="bg-red-950/25 border border-red-900/30 rounded-2xl p-3">
+          <p className="text-[11px] font-bold text-red-200">
+            Existem <span className="font-black">{itensZerados.length}</span> item(ns) com{' '}
+            <span className="font-black">ESTOQUE ZERADO</span>. Remova-os antes de fechar a venda.
+          </p>
+        </div>
+      </div>
+    )}  
+        
+        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-950/25">
+      {carrinho.map((item) => {
+        const zerado = (item.maxEstoque ?? 0) <= 0;
+        const disablePlus = zerado || item.qtd >= item.maxEstoque;
+
+        return (
+          <div
+            key={item.tempId}
+            className={`bg-slate-900/90 p-3 rounded-2xl border flex gap-3 relative group transition-colors shadow-sm ${
+              zerado ? 'border-red-900/60 hover:border-red-700' : 'border-slate-800 hover:border-slate-600'
+            }`}
+          >
+            <div className="w-16 h-16 rounded-xl bg-slate-800 overflow-hidden border border-slate-700 flex-shrink-0 relative">
+              {item.foto && signedMap[item.foto] ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={signedMap[item.foto]} className="w-full h-full object-cover" alt="" loading="lazy" decoding="async" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-xs">📷</div>
+              )}
+
+              {zerado && (
+                <div className="absolute bottom-0 left-0 right-0 bg-red-600/90 text-white text-[9px] font-black uppercase text-center py-0.5">
+                  zerado
+                </div>
+              )}
+            </div>
+
+            <div className="flex-1 min-w-0 flex flex-col justify-center">
+              <p className="text-xs font-black text-white leading-tight mb-1 line-clamp-2">{item.descricao}</p>
+              <p className="text-[9px] font-bold text-slate-500 mb-1 uppercase">
+                {item.cor} • {item.tamanho}
+              </p>
+
+              <div className="flex items-center gap-2">
+                <p className="text-[10px] text-slate-400 font-mono">{formatBRL(item.preco)} un.</p>
+                {zerado ? (
+                  <span className="text-[9px] font-black uppercase text-red-200 bg-red-950/30 border border-red-900/30 px-2 py-0.5 rounded-lg">
+                    estoque 0
+                  </span>
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center text-xs">📷</div>
+                  <span className="text-[9px] font-bold uppercase text-slate-400 bg-slate-950/40 border border-slate-800 px-2 py-0.5 rounded-lg">
+                    disp. {item.maxEstoque}
+                  </span>
                 )}
               </div>
+            </div>
 
-              <div className="flex-1 min-w-0 flex flex-col justify-center">
-                <p className="text-xs font-black text-white leading-tight mb-1 line-clamp-2">{item.descricao}</p>
-                <p className="text-[9px] font-bold text-slate-500 mb-1 uppercase">
-                  {item.cor} • {item.tamanho}
-                </p>
-                <p className="text-[10px] text-slate-400 font-mono">{formatBRL(item.preco)} un.</p>
+            <div className="flex flex-col items-end justify-between py-1">
+              <div className="flex items-center gap-1 bg-slate-950 rounded-lg p-1 border border-slate-800">
+                <button
+                  onClick={() => alterarQtd(item.tempId, -1)}
+                  className="w-8 h-8 flex items-center justify-center bg-slate-800 hover:bg-red-500/20 hover:text-red-500 rounded-lg text-lg font-bold transition text-slate-400 active:scale-90"
+                >
+                  -
+                </button>
+                <span className="text-sm font-bold w-6 text-center text-white">{item.qtd}</span>
+                <button
+                  onClick={() => alterarQtd(item.tempId, 1)}
+                  disabled={disablePlus}
+                  className={`w-8 h-8 flex items-center justify-center rounded-lg text-lg font-bold transition active:scale-90 ${
+                    disablePlus
+                      ? 'bg-slate-800/60 text-slate-600 cursor-not-allowed'
+                      : 'bg-slate-800 hover:bg-green-500/20 hover:text-green-500 text-slate-400'
+                  }`}
+                  title={zerado ? 'Estoque zerado' : item.qtd >= item.maxEstoque ? 'Limite do estoque' : 'Aumentar'}
+                >
+                  +
+                </button>
               </div>
+              <span className="font-black text-sm text-emerald-400">{formatBRL(item.preco * item.qtd)}</span>
+            </div>
 
-              <div className="flex flex-col items-end justify-between py-1">
-                <div className="flex items-center gap-1 bg-slate-950 rounded-lg p-1 border border-slate-800">
-                  <button
-                    onClick={() => alterarQtd(item.tempId, -1)}
-                    className="w-8 h-8 flex items-center justify-center bg-slate-800 hover:bg-red-500/20 hover:text-red-500 rounded-lg text-lg font-bold transition text-slate-400 active:scale-90"
-                  >
-                    -
-                  </button>
-                  <span className="text-sm font-bold w-6 text-center text-white">{item.qtd}</span>
-                  <button
-                    onClick={() => alterarQtd(item.tempId, 1)}
-                    className="w-8 h-8 flex items-center justify-center bg-slate-800 hover:bg-green-500/20 hover:text-green-500 rounded-lg text-lg font-bold transition text-slate-400 active:scale-90"
-                  >
-                    +
-                  </button>
-                </div>
-                <span className="font-black text-sm text-emerald-400">{formatBRL(item.preco * item.qtd)}</span>
-              </div>
+            <button
+              onClick={() => removerItem(item.tempId)}
+              className="absolute -top-2 -right-2 bg-red-600 text-white w-7 h-7 rounded-full text-[10px] font-bold shadow-lg flex items-center justify-center z-10 active:scale-90"
+            >
+              ✕
+            </button>
+          </div>
+        );
+      })}
+      <div className="h-20"></div>
+    </div>
 
+    <div className="p-6 bg-slate-950/95 backdrop-blur-md border-t border-slate-800 space-y-4 shadow-[0_-10px_40px_rgba(0,0,0,0.5)]">
+      <div className="flex justify-between items-end">
+        <span className="text-slate-500 text-xs font-bold uppercase tracking-widest">Total a Pagar</span>
+        <span className="text-4xl font-black text-white">{formatBRL(totalBruto)}</span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <button
+          disabled={loading || carrinho.length === 0}
+          onClick={salvarDraft}
+          className="w-full bg-slate-800 hover:bg-slate-700 text-white font-black py-5 rounded-xl shadow-lg uppercase tracking-widest text-[10px] transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 h-16"
+        >
+          {isEditandoDraft ? 'ATUALIZAR' : 'SALVAR'}
+        </button>
+
+        <button
+          disabled={loading || carrinho.length === 0}
+          onClick={abrirModalPagamento}
+          className={`w-full text-white font-black py-5 rounded-xl shadow-lg uppercase tracking-widest text-[10px] transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 h-16 ${
+            temZerados ? 'bg-red-700 hover:bg-red-600' : 'bg-gradient-to-r from-emerald-600 to-emerald-500 hover:brightness-110'
+          }`}
+          title={temZerados ? 'Remova itens com estoque zerado para fechar' : 'Fechar venda'}
+        >
+          {loading ? 'PROCESSANDO...' : temZerados ? 'REMOVA ITENS ZERADOS' : 'FECHAR VENDA (F2)'}
+        </button>
+      </div>
+    </div>
+    </div>  
+      </div>
+
+      {/* MODAL: LISTA DE DRAFTS (COM EXPAND PARA VER ITENS) */}
+      {mostrarDrafts && (
+        <div className="fixed inset-0 z-[500] bg-black/95 backdrop-blur-md flex items-end md:items-center justify-center p-0 md:p-4">
+          <div className="bg-slate-900 w-full max-w-2xl rounded-t-[2.5rem] md:rounded-[2.5rem] border-t md:border border-slate-700 shadow-2xl overflow-hidden flex flex-col max-h-[95vh]">
+            <div className="bg-slate-950 p-6 border-b border-slate-800 flex justify-between items-center shrink-0">
+              <h2 className="text-xl font-black uppercase text-white tracking-widest">Carrinhos salvos</h2>
               <button
-                onClick={() => removerItem(item.tempId)}
-                className="absolute -top-2 -right-2 bg-red-600 text-white w-7 h-7 rounded-full text-[10px] font-bold shadow-lg flex items-center justify-center z-10 active:scale-90"
+                onClick={() => setMostrarDrafts(false)}
+                className="w-10 h-10 rounded-full bg-slate-800 text-slate-400 hover:text-white font-bold transition active:scale-90"
               >
                 ✕
               </button>
             </div>
-          ))}
-          <div className="h-20"></div>
-        </div>
 
-        <div className="p-6 bg-slate-950 border-t border-slate-800 space-y-4 shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-50">
-          <div className="flex justify-between items-end">
-            <span className="text-slate-500 text-xs font-bold uppercase tracking-widest">Total a Pagar</span>
-            <span className="text-4xl font-black text-white">{formatBRL(totalBruto)}</span>
+            <div className="flex-1 overflow-y-auto p-6 space-y-3">
+              {drafts.length === 0 ? (
+                <div className="text-slate-500 text-sm font-bold uppercase tracking-widest text-center py-10">
+                  Nenhum carrinho salvo
+                </div>
+              ) : (
+                drafts.map((d) => {
+                  const isOpen = !!draftExpanded[d.id];
+                  const isLoadingItems = !!draftItemsLoading[d.id];
+                  const items = draftItemsCache[d.id] ?? [];
+                  const itensResumo = items.reduce((acc, it) => acc + (Number(it.qtd) || 0), 0);
+
+                  return (
+                    <div key={d.id} className="bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden">
+                      <div className="p-4 flex items-center justify-between gap-4">
+                        <button
+                          className="min-w-0 text-left flex-1"
+                          onClick={async () => {
+                            const next = !isOpen;
+                            setDraftExpanded((prev) => ({ ...prev, [d.id]: next }));
+                            if (next) await fetchDraftItemsPreview(d.id);
+                          }}
+                          title="Expandir para ver itens"
+                        >
+                          <p className="text-sm font-black text-white truncate">{d.titulo || 'Carrinho salvo'}</p>
+                          <p className="text-[10px] font-mono text-slate-500">
+                            {new Date(d.updated_at || d.created_at).toLocaleString('pt-BR')}
+                          </p>
+
+                          <div className="mt-2 flex items-center gap-2">
+                            {draftAtualId === d.id && (
+                              <span className="text-[10px] font-black uppercase text-emerald-400 bg-emerald-900/20 border border-emerald-900/30 px-2 py-1 rounded-lg">
+                                Ativo
+                              </span>
+                            )}
+                            <span className="text-[10px] font-black uppercase text-slate-300 bg-slate-900/40 border border-slate-800 px-2 py-1 rounded-lg">
+                              {isOpen ? 'Ocultar itens' : 'Ver itens'}
+                            </span>
+                            {items.length > 0 && (
+                              <span className="text-[10px] font-black uppercase text-slate-300 bg-slate-900/40 border border-slate-800 px-2 py-1 rounded-lg">
+                                {itensResumo} itens
+                              </span>
+                            )}
+                          </div>
+                        </button>
+
+                        <div className="flex items-center gap-2 shrink-0 pr-1">
+                          <button
+                            disabled={loading}
+                            onClick={() => carregarDraft(d.id, d.titulo)}
+                            className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest active:scale-95"
+                          >
+                            Carregar
+                          </button>
+                          <button
+                            disabled={loading}
+                            onClick={() => excluirDraft(d.id)}
+                            className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest active:scale-95"
+                          >
+                            Excluir
+                          </button>
+                        </div>
+                      </div>
+
+                      {isOpen && (
+                        <div className="border-t border-slate-800 bg-slate-950/60 p-4">
+                          {isLoadingItems ? (
+                            <div className="text-slate-400 text-xs font-bold uppercase tracking-widest py-3">
+                              Carregando itens...
+                            </div>
+                          ) : items.length === 0 ? (
+                            <div className="text-slate-500 text-xs font-bold uppercase tracking-widest py-3">
+                              Nenhum item neste carrinho
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {items.slice(0, 10).map((it, idx) => (
+                                <div
+                                  key={`${it.estoque_id}-${idx}`}
+                                  className="flex items-center justify-between gap-3 bg-slate-900/40 border border-slate-800 rounded-xl px-3 py-2"
+                                >
+                                  <div className="min-w-0">
+                                    <p className="text-[11px] font-black text-white truncate">{it.descricao}</p>
+                                    <p className="text-[9px] font-bold text-slate-400 uppercase truncate">
+                                      {(it.cor ?? '').trim()} • {(it.tamanho ?? '').trim()}
+                                    </p>
+                                  </div>
+                                  <div className="shrink-0 text-right">
+                                    <p className="text-[10px] font-black text-white">x{Number(it.qtd) || 0}</p>
+                                    <p className="text-[10px] font-mono text-slate-400">{formatBRL(Number(it.preco) || 0)}</p>
+                                  </div>
+                                </div>
+                              ))}
+
+                              {items.length > 10 && (
+                                <div className="text-slate-400 text-[10px] font-bold uppercase tracking-widest pt-2">
+                                  +{items.length - 10} item(ns)...
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="p-6 bg-slate-950 border-t border-slate-800 shrink-0 flex gap-3">
+              <button
+                onClick={fetchDrafts}
+                className="flex-1 bg-slate-800 text-white font-black py-4 rounded-2xl shadow-xl uppercase tracking-widest text-[10px] hover:bg-slate-700 active:scale-95"
+              >
+                Atualizar
+              </button>
+              <button
+                onClick={() => setMostrarDrafts(false)}
+                className="flex-1 bg-pink-600 text-white font-black py-4 rounded-2xl shadow-xl uppercase tracking-widest text-[10px] hover:bg-pink-500 active:scale-95"
+              >
+                Fechar
+              </button>
+            </div>
           </div>
-          <button
-            disabled={loading || carrinho.length === 0}
-            onClick={abrirModalPagamento}
-            className="w-full bg-gradient-to-r from-emerald-600 to-emerald-500 hover:brightness-110 text-white font-black py-5 rounded-xl shadow-lg uppercase tracking-widest text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 h-16"
-          >
-            {loading ? 'PROCESSANDO...' : 'FECHAR VENDA (F2)'}
-          </button>
         </div>
-      </div>
+      )}
 
       {/* MODAL DE CONFERÊNCIA */}
       {itemPendente && (
@@ -678,7 +1403,7 @@ function VendaPageInner() {
             <div className="relative aspect-square bg-black rounded-2xl border-2 border-slate-700 overflow-hidden shadow-2xl mx-auto w-32 shrink-0">
               {itemPendente.produto.foto_url && signedMap[itemPendente.produto.foto_url] ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={signedMap[itemPendente.produto.foto_url]} className="w-full h-full object-cover" alt="" />
+                <img src={signedMap[itemPendente.produto.foto_url]} className="w-full h-full object-cover" alt="" loading="lazy" decoding="async" />
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-4xl opacity-20">📷</div>
               )}
@@ -711,17 +1436,32 @@ function VendaPageInner() {
         </div>
       )}
 
-      {/* MODAL SELEÇÃO MANUAL */}
+      {/* MODAL SELEÇÃO MANUAL (AGORA COM THUMBNAIL) */}
       {modalSelecao && (
         <div className="fixed inset-0 z-[50] bg-black/90 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-6 animate-in fade-in duration-200">
           <div className="bg-slate-900 w-full max-w-lg rounded-t-[2rem] md:rounded-[2rem] p-6 border-t md:border border-slate-800 shadow-2xl relative max-h-[90vh] overflow-hidden flex flex-col">
-            <div className="flex justify-between items-start mb-6 shrink-0">
-              <div>
-                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Selecionando:</span>
-                <h2 className="text-xl font-black uppercase text-white leading-tight">{modalSelecao.descricao}</h2>
-                <p className="text-xs text-slate-400 font-bold mt-1 uppercase">{modalSelecao.cor}</p>
+            <div className="flex justify-between items-start mb-6 shrink-0 gap-4">
+              <div className="flex items-start gap-4 min-w-0">
+                <div className="w-16 h-16 rounded-2xl bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center shrink-0">
+                  {modalSelecao.foto_url && thumbMap[modalSelecao.foto_url] ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={thumbMap[modalSelecao.foto_url]} className="w-full h-full object-cover" alt="" loading="eager" decoding="async" />
+                  ) : (
+                    <span className="text-2xl opacity-50">📷</span>
+                  )}
+                </div>
+
+                <div className="min-w-0">
+                  <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Selecionando:</span>
+                  <h2 className="text-xl font-black uppercase text-white leading-tight truncate">{modalSelecao.descricao}</h2>
+                  <p className="text-xs text-slate-400 font-bold mt-1 uppercase truncate">{modalSelecao.cor}</p>
+                </div>
               </div>
-              <button onClick={() => setModalSelecao(null)} className="bg-slate-800 w-10 h-10 rounded-full text-slate-400 hover:text-white font-bold text-xl active:scale-90">
+
+              <button
+                onClick={() => setModalSelecao(null)}
+                className="bg-slate-800 w-10 h-10 rounded-full text-slate-400 hover:text-white font-bold text-xl active:scale-90 shrink-0"
+              >
                 ✕
               </button>
             </div>
@@ -748,6 +1488,11 @@ function VendaPageInner() {
                     );
                   })}
                 </div>
+              </div>
+
+              <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Preço</span>
+                <span className="text-lg font-black text-emerald-400">{formatBRL(modalSelecao.preco_venda)}</span>
               </div>
             </div>
           </div>
@@ -879,12 +1624,28 @@ function VendaPageInner() {
       {imgSrc && (
         <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center">
           <div className="relative w-full h-full bg-black">
-            <Cropper image={imgSrc} crop={crop} zoom={zoom} aspect={3 / 2} onCropChange={setCrop} onCropComplete={onCropComplete} onZoomChange={setZoom} />
+            <Cropper
+              image={imgSrc}
+              crop={crop}
+              zoom={zoom}
+              aspect={3 / 2}
+              onCropChange={setCrop}
+              onCropComplete={onCropComplete}
+              onZoomChange={setZoom}
+            />
           </div>
 
           <div className="absolute bottom-0 left-0 right-0 p-6 z-50 flex flex-col gap-4 bg-black/80 backdrop-blur-md pb-10">
             <p className="text-center text-xs text-slate-300">Ajuste o código de barras</p>
-            <input type="range" value={zoom} min={1} max={3} step={0.1} onChange={(e) => setZoom(Number(e.target.value))} className="w-full accent-pink-500 h-10" />
+            <input
+              type="range"
+              value={zoom}
+              min={1}
+              max={3}
+              step={0.1}
+              onChange={(e) => setZoom(Number(e.target.value))}
+              className="w-full accent-pink-500 h-10"
+            />
             <div className="flex gap-2">
               <button onClick={() => setImgSrc(null)} className="flex-1 bg-slate-800 text-white py-4 rounded-2xl font-bold uppercase">
                 Cancelar
