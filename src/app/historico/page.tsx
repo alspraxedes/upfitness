@@ -1,10 +1,9 @@
-// src/app/historico/page.tsx
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useState, useRef, useMemo, Suspense } from 'react';
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '../../lib/supabase';
+import { useSearchParams } from 'next/navigation';
 
 // --- TIPOS ATUALIZADOS ---
 type ItemVenda = {
@@ -50,22 +49,33 @@ const formatData = (dataIso: string) => {
   });
 };
 
-// Mantém os filtros do Dashboard ao navegar (q, sizes, brand, hideZero)
-function getDashboardQS(searchParams: ReturnType<typeof useSearchParams>) {
+function getQS(searchParams: ReturnType<typeof useSearchParams>) {
   const qs = searchParams?.toString() ?? '';
   return qs ? `?${qs}` : '';
 }
 
 export default function HistoricoPage() {
-  const router = useRouter();
+  // Next.js / Vercel: useSearchParams precisa estar em Suspense
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-950 text-slate-100" />}>
+      <HistoricoPageInner />
+    </Suspense>
+  );
+}
+
+function HistoricoPageInner() {
   const searchParams = useSearchParams();
+  const dashQS = useMemo(() => getQS(searchParams), [searchParams]);
 
   const [vendas, setVendas] = useState<Venda[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Filtros (da página)
+  // Filtros
   const [dataInicio, setDataInicio] = useState('');
   const [dataFim, setDataFim] = useState('');
+
+  // Persistência
+  const STORAGE_KEY = 'upfitness_historico_filtros_v1';
 
   // Controles de Visualização
   const [expandidoId, setExpandidoId] = useState<string | null>(null);
@@ -77,21 +87,37 @@ export default function HistoricoPage() {
 
   const printRef = useRef<HTMLDivElement>(null);
 
-  // Querystring do dashboard para “voltar preservando filtros”
-  const dashQS = useMemo(() => getDashboardQS(searchParams), [searchParams]);
-
+  // Carrega filtros do localStorage (client-only)
   useEffect(() => {
-    // (opcional) protege rota
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      if (!data.session) {
-        router.replace('/login');
-        return;
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.dataInicio === 'string') setDataInicio(parsed.dataInicio);
+        if (typeof parsed?.dataFim === 'string') setDataFim(parsed.dataFim);
       }
-      fetchVendas();
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    } catch {
+      // ignore
+    }
   }, []);
+
+  // Salva filtros sempre que mudarem
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ dataInicio, dataFim }));
+    } catch {
+      // ignore
+    }
+  }, [dataInicio, dataFim]);
+
+  // Busca vendas sempre que filtros mudarem (com debounce leve)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      fetchVendas();
+    }, 150);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataInicio, dataFim]);
 
   async function fetchVendas() {
     setLoading(true);
@@ -116,7 +142,15 @@ export default function HistoricoPage() {
     else if (!dataInicio) query = query.limit(50);
 
     const { data, error } = await query;
-    if (!error) setVendas((data as any) || []);
+
+    if (error) {
+      console.error(error);
+      alert('Erro ao buscar vendas: ' + error.message);
+      setVendas([]);
+    } else {
+      setVendas((data as any) || []);
+    }
+
     setLoading(false);
   }
 
@@ -143,7 +177,7 @@ export default function HistoricoPage() {
     return { faturamento, custoTotal, lucro, margem };
   }, [vendas]);
 
-  // Cancelamento/Exclusão
+  // Lógica de Cancelamento/Exclusão
   const executarAcao = async () => {
     if (!modalConfirmacao) return;
     setProcessandoAcao(true);
@@ -152,9 +186,21 @@ export default function HistoricoPage() {
     try {
       if (tipo === 'cancelar') {
         for (const item of venda.itens_venda) {
-          const { data: estAtual } = await supabase.from('estoque').select('quantidade').eq('id', item.estoque_id).single();
+          const { data: estAtual, error: errEst } = await supabase
+            .from('estoque')
+            .select('quantidade')
+            .eq('id', item.estoque_id)
+            .single();
+
+          if (errEst) throw errEst;
+
           if (estAtual) {
-            await supabase.from('estoque').update({ quantidade: estAtual.quantidade + item.quantidade }).eq('id', item.estoque_id);
+            const { error: errUp } = await supabase
+              .from('estoque')
+              .update({ quantidade: estAtual.quantidade + item.quantidade })
+              .eq('id', item.estoque_id);
+
+            if (errUp) throw errUp;
           }
         }
       }
@@ -163,9 +209,9 @@ export default function HistoricoPage() {
       if (error) throw error;
 
       setModalConfirmacao(null);
-      fetchVendas();
+      await fetchVendas();
     } catch (err: any) {
-      alert('Erro: ' + err.message);
+      alert('Erro: ' + (err?.message || String(err)));
     } finally {
       setProcessandoAcao(false);
     }
@@ -176,7 +222,7 @@ export default function HistoricoPage() {
     const janela = window.open('', '', 'height=600,width=400');
     if (janela && conteudo) {
       janela.document.write(
-        '<html><head><title>Recibo UPFITNESS</title><style>body { font-family: monospace; padding: 20px; } .row { display: flex; justify-content: space-between; }</style></head><body>'
+        '<html><head><title>Recibo UPFITNESS</title><style>body{font-family:monospace;padding:20px}.row{display:flex;justify-content:space-between}</style></head><body>'
       );
       janela.document.write(conteudo);
       janela.document.close();
@@ -191,20 +237,28 @@ export default function HistoricoPage() {
     window.open(`https://wa.me/?text=${texto}`, '_blank');
   };
 
+  const limparFiltros = () => {
+    setDataInicio('');
+    setDataFim('');
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans pb-24">
       {/* HEADER */}
       <header className="bg-slate-900 p-6 border-b border-slate-800 sticky top-0 z-20 shadow-xl space-y-4">
         <div className="flex items-center gap-4">
-          {/* VOLTAR preservando filtros do dashboard */}
+          {/* Voltar mantendo querystring (persistência de filtros do dashboard) */}
           <Link
             href={`/${dashQS}`}
             className="bg-slate-800 p-2 rounded-full text-slate-400 hover:text-white border border-slate-700 active:scale-95 transition"
-            aria-label="Voltar"
           >
             ←
           </Link>
-
           <div>
             <h1 className="font-black italic text-xl uppercase tracking-tighter">
               Histórico <span className="text-pink-600">Vendas</span>
@@ -228,12 +282,21 @@ export default function HistoricoPage() {
             />
           </div>
 
-          <button
-            onClick={fetchVendas}
-            className="bg-pink-600 text-white px-6 py-2 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 hover:bg-pink-500 transition"
-          >
-            Filtrar
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={fetchVendas}
+              className="flex-1 bg-pink-600 text-white px-6 py-2 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 hover:bg-pink-500 transition"
+            >
+              Filtrar
+            </button>
+            <button
+              onClick={limparFiltros}
+              className="bg-slate-800 text-slate-200 px-4 py-2 rounded-xl font-black uppercase text-xs tracking-widest border border-slate-700 hover:bg-slate-700 active:scale-95 transition"
+              title="Limpar filtros salvos"
+            >
+              Limpar
+            </button>
+          </div>
         </div>
       </header>
 
@@ -277,7 +340,7 @@ export default function HistoricoPage() {
                 return acc + item.quantidade * ((p?.preco_compra || 0) + (p?.custo_frete || 0) + (p?.custo_embalagem || 0));
               }, 0);
 
-              const lucroVenda = venda.valor_liquido - custoVenda;
+              const lucroVenda = (venda.valor_liquido || 0) - custoVenda;
 
               return (
                 <div
@@ -297,11 +360,7 @@ export default function HistoricoPage() {
                       <div className="flex items-center gap-2">
                         <span
                           className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded text-slate-950 ${
-                            venda.forma_pagamento === 'pix'
-                              ? 'bg-emerald-400'
-                              : venda.forma_pagamento === 'credito'
-                              ? 'bg-blue-400'
-                              : 'bg-yellow-400'
+                            venda.forma_pagamento === 'pix' ? 'bg-emerald-400' : venda.forma_pagamento === 'credito' ? 'bg-blue-400' : 'bg-yellow-400'
                           }`}
                         >
                           {venda.forma_pagamento}
@@ -322,10 +381,7 @@ export default function HistoricoPage() {
                       <div className="space-y-2 mb-4">
                         <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-2">Itens do Pedido</p>
                         {venda.itens_venda.map((item) => (
-                          <div
-                            key={item.id}
-                            className="flex justify-between items-center text-sm border-b border-slate-800/50 pb-2 last:border-0 last:pb-0"
-                          >
+                          <div key={item.id} className="flex justify-between items-center text-sm border-b border-slate-800/50 pb-2 last:border-0 last:pb-0">
                             <div className="text-slate-300">
                               <span className="font-bold text-slate-500 mr-2">{item.quantidade}x</span>
                               {item.descricao_completa}
@@ -425,7 +481,10 @@ export default function HistoricoPage() {
                   💬 WhatsApp
                 </button>
               </div>
-              <button onClick={() => setVendaRecibo(null)} className="w-full text-slate-500 py-2 font-bold uppercase tracking-widest text-[10px] hover:text-red-500 transition">
+              <button
+                onClick={() => setVendaRecibo(null)}
+                className="w-full text-slate-500 py-2 font-bold uppercase tracking-widest text-[10px] hover:text-red-500 transition"
+              >
                 Fechar
               </button>
             </div>
@@ -445,17 +504,21 @@ export default function HistoricoPage() {
               >
                 {modalConfirmacao.tipo === 'cancelar' ? '🚫' : '🗑️'}
               </div>
+
               <h3 className="text-xl font-black uppercase text-white">{modalConfirmacao.tipo === 'cancelar' ? 'Cancelar Venda?' : 'Apagar Registro?'}</h3>
+
               <p className="text-sm text-slate-400 leading-relaxed">
                 {modalConfirmacao.tipo === 'cancelar' ? (
                   <span>
-                    Você está prestes a cancelar a venda <b>#{modalConfirmacao.venda.codigo_venda}</b>. <br />
+                    Você está prestes a cancelar a venda <b>#{modalConfirmacao.venda.codigo_venda}</b>.
+                    <br />
                     <br />
                     <span className="text-orange-400 font-bold">⚠️ O estoque dos itens será devolvido automaticamente.</span>
                   </span>
                 ) : (
                   <span>
-                    Você vai remover o registro da venda <b>#{modalConfirmacao.venda.codigo_venda}</b> do histórico. <br />
+                    Você vai remover o registro da venda <b>#{modalConfirmacao.venda.codigo_venda}</b> do histórico.
+                    <br />
                     <br />
                     <span className="text-red-400 font-bold">⚠️ O estoque NÃO será alterado.</span>
                   </span>
@@ -470,6 +533,7 @@ export default function HistoricoPage() {
               >
                 Voltar
               </button>
+
               <button
                 onClick={executarAcao}
                 disabled={processandoAcao}
