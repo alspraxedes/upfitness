@@ -48,6 +48,193 @@ function extractPath(url: string | null) {
   }
 }
 
+// --- COR (extração + fallback + suporte a cores compostas com "/") ---
+function normalizeColorText(s: string) {
+  return (s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // remove acentos
+    .toUpperCase()
+    .trim();
+}
+
+function cleanColorText(raw: string) {
+  // Remove prefixos típicos do seu padrão:
+  // "C0608 - ...", "E1341.V26 - VESTEM ...", etc.
+  let s = normalizeColorText(raw);
+
+  // remove prefixos "E.... - VESTEM "
+  s = s.replace(/^[A-Z]\d{3,5}(\.[A-Z0-9]{2,4})?\s*-\s*VESTEM\s+/i, '');
+  // remove prefixos "C0001 - "
+  s = s.replace(/^C\s*\d{4}\s*-\s*/i, '');
+  // remove prefixos genéricos "COD/REF"
+  s = s.replace(/^(COD|REF)\s*[-\s]?\d{3,6}\s*-\s*/i, '');
+
+  // limpa múltiplos espaços
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+function textToHslColor(input: string) {
+  // hash simples e estável (fallback)
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
+  const hue = hash % 360;
+  const sat = 58;
+  const light = 46;
+  return `hsl(${hue} ${sat}% ${light}%)`;
+}
+
+type ColorHit = { label: string; color: string };
+
+// Dicionário prático: cobre o padrão atual e cai em fallback para o restante.
+// Você pode adicionar novos termos aqui sem mexer na lógica.
+const COLOR_KEYWORDS: Array<{ keys: string[]; label: string; color: string }> = [
+  // Preto / Branco / Cinza
+  { keys: ['PRETO', 'EBANO', 'EBANO ', 'E B A N O', 'COSTAS PRETO', 'TULE PRETO', 'GIRO PRETO', 'CONTORNO PRETO', 'NADADOR PRETO', 'ELASTICO PRETO', 'ESSENTIALS PRETO', 'PRO PRETO'], label: 'PRETO', color: '#0B0F19' },
+  { keys: ['BRANCO OPTICO', 'BRANCO ÓPTICO', 'BRANCO', 'OPTICO'], label: 'BRANCO', color: '#F8FAFC' },
+  { keys: ['CINZA FERRO', 'FERRO'], label: 'CINZA', color: '#475569' },
+  { keys: ['CINZA'], label: 'CINZA', color: '#64748B' },
+
+  // Off-white / creme / manteiga / nude / bege
+  { keys: ['OFF WHITE', 'OFFWHITE', 'ECRU', 'ECRU', 'ECRU ', 'OFF WHITE/ECRU'], label: 'OFF WHITE', color: '#EEE7D8' },
+  { keys: ['CREME'], label: 'CREME', color: '#E9DFCF' },
+  { keys: ['MANTEIGA'], label: 'MANTEIGA', color: '#F1E3B5' },
+  { keys: ['NUDE'], label: 'NUDE', color: '#D6B9A8' },
+
+  // Marrom
+  { keys: ['MARROM COFFEE', 'COFFEE'], label: 'COFFEE', color: '#4B2E2A' },
+  { keys: ['MARROM NOBRE'], label: 'MARROM', color: '#5A3A2E' },
+  { keys: ['MARROM'], label: 'MARROM', color: '#6B4E3D' },
+
+  // Vermelho / Vinho
+  { keys: ['VERMELHO DESEJO', 'DESEJO'], label: 'VERMELHO', color: '#C0262D' },
+  { keys: ['VERMELHO VIBRANTE', 'VIBRANTE'], label: 'VERMELHO', color: '#E11D48' },
+  { keys: ['VERMELHO GRENADINE', 'GRENADINE'], label: 'VERMELHO', color: '#BE123C' },
+  { keys: ['VERMELHO TINTO', 'TINTO'], label: 'VINHO', color: '#7F1D1D' },
+  { keys: ['VINHO'], label: 'VINHO', color: '#7F1D1D' },
+  { keys: ['VERMELHO'], label: 'VERMELHO', color: '#B91C1C' },
+
+  // Rosa / Lilás / Roxo
+  { keys: ['ROSA AURORA', 'AURORA'], label: 'ROSA', color: '#F472B6' },
+  { keys: ['ROSA DOCE', 'DOCE'], label: 'ROSA', color: '#FB7185' },
+  { keys: ['ROSA PASTEL', 'PASTEL'], label: 'ROSA', color: '#FDA4AF' },
+  { keys: ['ROSA ELECTRA', 'ELECTRA'], label: 'ROSA', color: '#EC4899' },
+  { keys: ['ROSA ROMANCE', 'ROMANCE'], label: 'ROSA', color: '#F43F5E' },
+  { keys: ['ROSA SATIN', 'SATIN'], label: 'ROSA', color: '#F9A8D4' },
+  { keys: ['UVA ROSE', 'UVA ROSE', 'UVA'], label: 'UVA', color: '#A21CAF' },
+  { keys: ['LILAS LAVANDA', 'LILAS', 'LILÁS', 'LAVANDA'], label: 'LILÁS', color: '#A78BFA' },
+  { keys: ['ROXO AMETISTA', 'AMETISTA'], label: 'ROXO', color: '#7C3AED' },
+  { keys: ['ROXO HORTENSIA', 'HORTENSIA', 'HORTÊNSIA'], label: 'ROXO', color: '#8B5CF6' },
+  { keys: ['ROXO'], label: 'ROXO', color: '#7C3AED' },
+  { keys: ['ROSA'], label: 'ROSA', color: '#DB2777' },
+
+  // Azul / Marinho / Jeans
+  { keys: ['MARINHO ESCURIDAO', 'MARINHO', 'NOTURNO', 'JAGUAR NOTURNO'], label: 'MARINHO', color: '#0F2A4A' },
+  { keys: ['AZUL JEANS', 'JEANS', 'DENIM'], label: 'JEANS', color: '#1D4ED8' },
+  { keys: ['AZUL SUBMARINE', 'SUBMARINE'], label: 'AZUL', color: '#0E7490' },
+  { keys: ['AZUL NEBLINA', 'NEBLINA'], label: 'AZUL', color: '#60A5FA' },
+  { keys: ['AZUL ENSEADA', 'ENSEADA'], label: 'AZUL', color: '#2563EB' },
+  { keys: ['AZUL BLUEBERRY', 'BLUEBERRY'], label: 'AZUL', color: '#1E40AF' },
+  { keys: ['AZUL CRISTALINO', 'CRISTALINO'], label: 'AZUL', color: '#38BDF8' },
+  { keys: ['AZUL GAROA', 'GAROA'], label: 'AZUL', color: '#93C5FD' },
+  { keys: ['AZUL RETRO', 'RETRO'], label: 'AZUL', color: '#3B82F6' },
+  { keys: ['AZUL LAGOA', 'LAGOA'], label: 'AZUL', color: '#22D3EE' },
+  { keys: ['AZUL'], label: 'AZUL', color: '#2563EB' },
+
+  // Verde
+  { keys: ['VERDE HERA', 'HERA'], label: 'VERDE', color: '#16A34A' },
+  { keys: ['VERDE MENTA', 'MENTA'], label: 'MENTA', color: '#34D399' },
+  { keys: ['VERDE MINT', 'MINT'], label: 'MINT', color: '#22C55E' },
+  { keys: ['VERDE EDEN', 'EDEN'], label: 'VERDE', color: '#15803D' },
+  { keys: ['VERDE CROCO', 'CROCO'], label: 'VERDE', color: '#2F6F3E' },
+  { keys: ['VERDE TWIST', 'TWIST'], label: 'VERDE', color: '#10B981' },
+  { keys: ['VERDE PRIMAVERA', 'PRIMAVERA'], label: 'VERDE', color: '#4ADE80' },
+  { keys: ['VERDE BRISA', 'BRISA'], label: 'VERDE', color: '#86EFAC' },
+  { keys: ['VERDE CALIDO', 'CALIDO', 'CÁLIDO'], label: 'VERDE', color: '#22C55E' },
+  { keys: ['VERDE ESCURO', 'ESCURO'], label: 'VERDE', color: '#14532D' },
+  { keys: ['VERDE'], label: 'VERDE', color: '#16A34A' },
+
+  // Amarelo / Mostarda
+  { keys: ['AMARELO NEON', 'NEON'], label: 'AMARELO', color: '#FACC15' },
+  { keys: ['MOSTARDA DIJON', 'MOSTARDA', 'DIJON'], label: 'MOSTARDA', color: '#EAB308' },
+  { keys: ['AMARELO'], label: 'AMARELO', color: '#F59E0B' },
+
+  // Laranja / Coral
+  { keys: ['LARANJA NEON'], label: 'LARANJA', color: '#FB923C' },
+  { keys: ['LARANJA ZIG ZAG', 'ZIG ZAG'], label: 'LARANJA', color: '#F97316' },
+  { keys: ['LARANJA CAMELIA', 'CAMELIA', 'CAMÉLIA'], label: 'LARANJA', color: '#EA580C' },
+  { keys: ['CORALINA', 'CORAL'], label: 'CORAL', color: '#FB7185' },
+  { keys: ['LARANJA'], label: 'LARANJA', color: '#F97316' },
+];
+
+function findColorHit(rawPart: string): ColorHit | null {
+  const s = normalizeColorText(rawPart);
+
+  // ignora termos que não são cor (ex.: TEX)
+  if (!s || s === 'TEX') return null;
+
+  for (const entry of COLOR_KEYWORDS) {
+    for (const k of entry.keys) {
+      const keyNorm = normalizeColorText(k);
+      if (keyNorm && s.includes(keyNorm)) return { label: entry.label, color: entry.color };
+    }
+  }
+
+  // fallback por hash (estável)
+  return { label: 'COR', color: textToHslColor(s) };
+}
+
+function getSwatchStyle(raw: string | null | undefined) {
+  const cleaned = raw ? cleanColorText(raw) : '';
+
+  // separa composições com "/"
+  const parts = cleaned
+    ? cleaned
+        .split('/')
+        .map((p) => p.trim())
+        .filter(Boolean)
+    : [];
+
+  // tenta pegar até 2 cores “de verdade”
+  const hits: ColorHit[] = [];
+  const used = new Set<string>();
+
+  for (const p of (parts.length ? parts : [cleaned])) {
+    const hit = findColorHit(p);
+    if (!hit) continue;
+    const key = hit.color;
+    if (!used.has(key)) {
+      used.add(key);
+      hits.push(hit);
+    }
+    if (hits.length >= 2) break;
+  }
+
+  // Se ainda não tem nada, usa cinza neutro
+  if (hits.length === 0) {
+    return {
+      aria: cleaned || 'Sem cor',
+      style: { backgroundColor: '#94A3B8' } as React.CSSProperties,
+    };
+  }
+
+  // 2 cores => gradiente (metade/metade)
+  if (hits.length >= 2) {
+    return {
+      aria: cleaned,
+      style: {
+        backgroundImage: `linear-gradient(90deg, ${hits[0].color} 0 50%, ${hits[1].color} 50% 100%)`,
+      } as React.CSSProperties,
+    };
+  }
+
+  // 1 cor
+  return {
+    aria: cleaned,
+    style: { backgroundColor: hits[0].color } as React.CSSProperties,
+  };
+}
+
 type Anchor = { id: string; top: number };
 
 export default function Dashboard() {
@@ -505,11 +692,7 @@ export default function Dashboard() {
               onFocus={() => setInputFocado(true)}
               onBlur={() => setInputFocado(false)}
             />
-            <button
-              onClick={() => setMostrarScanner(true)}
-              className="absolute right-4 top-4 text-slate-500 text-xl"
-              aria-label="Scanner"
-            >
+            <button onClick={() => setMostrarScanner(true)} className="absolute right-4 top-4 text-slate-500 text-xl" aria-label="Scanner">
               📷
             </button>
           </div>
@@ -534,6 +717,9 @@ export default function Dashboard() {
               const urlAssinada = produto.foto_url ? signedMap[produto.foto_url] : null;
               const total = produto.estoque?.reduce((acc: number, item: any) => acc + (item.quantidade || 0), 0) || 0;
               const itemHref = currentQS ? `/item/${produto.id}?${currentQS}` : `/item/${produto.id}`;
+
+              // ✅ cor do balão (com suporte a "AZUL/MENTA", "PRETO/BRANCO", "OFF WHITE/ECRU")
+              const swatch = getSwatchStyle(produto.cor);
 
               return (
                 <Link
@@ -577,9 +763,19 @@ export default function Dashboard() {
                   <div className="flex-1 p-6 flex flex-col justify-between min-w-0">
                     <div>
                       <h2 className="font-bold text-slate-100 text-[13px] uppercase line-clamp-2 leading-tight">{produto.descricao}</h2>
-                      <p className="text-[10px] text-slate-600 font-bold mt-1 uppercase tracking-wide">
-                        {produto.fornecedor || 'Geral'} • {produto.cor}
-                      </p>
+
+                      {/* ✅ Linha fornecedor + cor com balão */}
+                      <div className="mt-1 flex items-center gap-2 min-w-0">
+                        <span
+                          className="w-3.5 h-3.5 rounded-full border border-white/10 shadow flex-shrink-0"
+                          style={swatch.style}
+                          aria-label={`Cor: ${swatch.aria || 'não informado'}`}
+                          title={produto.cor || ''}
+                        />
+                        <p className="text-[10px] text-slate-600 font-bold uppercase tracking-wide truncate">
+                          {produto.fornecedor || 'Geral'} • {produto.cor}
+                        </p>
+                      </div>
                     </div>
 
                     <div className="flex flex-wrap gap-1.5 mt-3">
@@ -713,10 +909,7 @@ export default function Dashboard() {
 
       {/* NAV FLUTUANTE (✅ some quando o input está focado / teclado aberto) */}
       {!inputFocado && (
-        <div
-          className="fixed left-6 right-6 z-[60]"
-          style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + 10px)` }}
-        >
+        <div className="fixed left-6 right-6 z-[60]" style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + 10px)` }}>
           <nav className="bg-slate-900/95 backdrop-blur-2xl border border-white/5 rounded-[2.5rem] h-20 px-6 flex items-center justify-around shadow-2xl">
             <Link href="/" className="flex flex-col items-center gap-1">
               <div className="p-2 rounded-2xl bg-pink-500/20 text-pink-500">
@@ -751,10 +944,7 @@ export default function Dashboard() {
         <div className="fixed inset-0 z-[120] bg-slate-950 flex flex-col p-6 animate-in slide-in-from-bottom">
           <div className="flex justify-between items-center mb-6 pt-6 px-4">
             <h3 className="font-black text-[10px] uppercase text-pink-500 italic tracking-widest">Leitor de Código</h3>
-            <button
-              onClick={() => setMostrarScanner(false)}
-              className="text-white bg-slate-800 px-6 py-2 rounded-full text-[10px] font-black uppercase"
-            >
+            <button onClick={() => setMostrarScanner(false)} className="text-white bg-slate-800 px-6 py-2 rounded-full text-[10px] font-black uppercase">
               Voltar
             </button>
           </div>
