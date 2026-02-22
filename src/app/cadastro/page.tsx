@@ -1,11 +1,10 @@
-// src/app/cadastro/page.tsx
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useState, useEffect, useRef, useMemo, Suspense } from 'react';
 import { supabase } from '../../lib/supabase';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import { Html5Qrcode } from 'html5-qrcode';
 
 // --- UTILITÁRIOS ---
 function blobToFile(blob: Blob, filename: string) {
@@ -28,15 +27,30 @@ const playBeep = () => {
   }
 };
 
-// extrai querystring atual para manter persistência de filtros
-function getQSFromSearchParams(searchParams: ReturnType<typeof useSearchParams>) {
+function getDashboardQS(searchParams: ReturnType<typeof useSearchParams>) {
   const qs = searchParams?.toString() ?? '';
   return qs ? `?${qs}` : '';
 }
 
+/**
+ * IMPORTANTE (Next.js / Vercel):
+ * useSearchParams() precisa estar dentro de um Suspense boundary.
+ * Por isso esta página é dividida em:
+ * - CadastroPage (wrapper com Suspense)
+ * - CadastroPageInner (onde useSearchParams é usado)
+ */
 export default function CadastroPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-950" />}>
+      <CadastroPageInner />
+    </Suspense>
+  );
+}
+
+function CadastroPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const dashQS = useMemo(() => getDashboardQS(searchParams), [searchParams]);
 
   const [loading, setLoading] = useState(false);
 
@@ -65,7 +79,9 @@ export default function CadastroPage() {
   // FOTO E ESTOQUE
   const [foto, setFoto] = useState<{ file: File | null; preview: string }>({ file: null, preview: '' });
 
-  const [tamanhos, setTamanhos] = useState<{ tamanho_id: string; qtd: number; ean: string }[]>([{ tamanho_id: '', qtd: 0, ean: '' }]);
+  const [tamanhos, setTamanhos] = useState<{ tamanho_id: string; qtd: number; ean: string }[]>([
+    { tamanho_id: '', qtd: 0, ean: '' },
+  ]);
 
   // CÂMERA E SCANNER
   const [modalFotoAberto, setModalFotoAberto] = useState(false);
@@ -75,9 +91,6 @@ export default function CadastroPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-
-  // Querystring atual (mantém filtros ao voltar)
-  const backHref = useMemo(() => `/${getQSFromSearchParams(searchParams)}`, [searchParams]);
 
   // --- CARREGAMENTO INICIAL ---
   useEffect(() => {
@@ -145,6 +158,7 @@ export default function CadastroPage() {
       const novoPrecoVenda = custoTotal * (1 + margemAtual / 100);
       dadosAtuais.preco_venda = novoPrecoVenda.toFixed(2);
     }
+
     setFormData(dadosAtuais);
   };
 
@@ -153,13 +167,14 @@ export default function CadastroPage() {
     setModalFotoAberto(false);
     setCameraAtiva({ tipo: 'foto' });
     setFotoTemp(null);
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
       });
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch (err) {
+    } catch {
       alert('Câmera indisponível.');
       setCameraAtiva(null);
     }
@@ -172,6 +187,7 @@ export default function CadastroPage() {
     canvas.width = v.videoWidth;
     canvas.height = v.videoHeight;
     canvas.getContext('2d')?.drawImage(v, 0, 0);
+
     canvas.toBlob(
       (blob) => {
         if (!blob) return;
@@ -189,123 +205,58 @@ export default function CadastroPage() {
     fecharCamera();
   };
 
-  // --- SCANNER (EAN) - corrigido p/ códigos de barras (EAN/UPC/Code128) + cleanup robusto ---
+  // --- SCANNER (EAN) ---
   useEffect(() => {
-    if (cameraAtiva?.tipo !== 'ean') return;
+    if (cameraAtiva?.tipo === 'ean') {
+      const elementId = 'reader-cadastro-direct';
+      const t = setTimeout(() => {
+        if (!document.getElementById(elementId)) return;
 
-    const elementId = 'reader-cadastro-direct';
-    let cancelled = false;
+        const html5QrCode = new Html5Qrcode(elementId);
+        scannerRef.current = html5QrCode;
 
-    const stopAndClear = async (s: Html5Qrcode | null) => {
-      if (!s) return;
-      try {
-        const maybe = s.stop();
-        if (maybe && typeof (maybe as any).then === 'function') {
-          await (maybe as Promise<void>).catch(() => {});
-        }
-      } catch {}
-      try {
-        s.clear();
-      } catch {}
-    };
-
-    const start = async () => {
-      await new Promise((r) => setTimeout(r, 200));
-      if (cancelled) return;
-
-      const el = document.getElementById(elementId);
-      if (!el) return;
-
-      // limpa container
-      el.innerHTML = '';
-
-      // encerra scanner anterior
-      await stopAndClear(scannerRef.current);
-
-      const html5QrCode = new Html5Qrcode(elementId);
-      scannerRef.current = html5QrCode;
-
-      const config: any = {
-        fps: 12,
-        qrbox: { width: 320, height: 140 },
-        aspectRatio: 1.777,
-        disableFlip: true,
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.CODE_39,
-          Html5QrcodeSupportedFormats.ITF,
-        ],
-        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-      };
-
-      try {
-        await html5QrCode.start(
-          { facingMode: 'environment' },
-          config,
-          async (text) => {
-            if (cancelled) return;
-            const cleaned = String(text || '').trim();
-            if (!cleaned) return;
-
-            playBeep();
-
-            // atualiza tamanho sem depender de `tamanhos` como dependency (evita re-start/loops)
-            const idx = cameraAtiva.idxTam;
-            if (typeof idx === 'number') {
-              setTamanhos((prev) => {
-                const n = [...prev];
-                if (n[idx]) n[idx] = { ...n[idx], ean: cleaned };
-                return n;
-              });
-            }
-
-            await stopAndClear(html5QrCode);
+        html5QrCode
+          .start(
+            { facingMode: 'environment' },
+            { fps: 30, qrbox: { width: 250, height: 100 }, aspectRatio: 1.0 },
+            (text) => {
+              playBeep();
+              if (cameraAtiva.idxTam !== undefined) {
+                const n = [...tamanhos];
+                n[cameraAtiva.idxTam].ean = text;
+                setTamanhos(n);
+              }
+              fecharCamera();
+            },
+            () => {}
+          )
+          .catch((err) => {
+            console.error(err);
+            alert('Erro ao iniciar câmera.');
             setCameraAtiva(null);
-          },
-          () => {}
-        );
-      } catch (err) {
-        console.error(err);
-        alert('Erro ao iniciar câmera.');
-        setCameraAtiva(null);
-      }
-    };
+          });
+      }, 200);
 
-    start();
-
-    return () => {
-      cancelled = true;
-      stopAndClear(scannerRef.current);
-    };
-    // dependências estáveis: não colocar `tamanhos` aqui
-  }, [cameraAtiva?.tipo, cameraAtiva?.idxTam]);
+      return () => clearTimeout(t);
+    }
+  }, [cameraAtiva, tamanhos]);
 
   const fecharCamera = async () => {
     setFotoTemp(null);
 
-    // stream da câmera (foto)
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
     if (videoRef.current) videoRef.current.srcObject = null;
 
-    // scanner
     if (scannerRef.current) {
       try {
-        const maybe = scannerRef.current.stop();
-        if (maybe && typeof (maybe as any).then === 'function') {
-          await (maybe as Promise<void>).catch(() => {});
-        }
-      } catch {}
-      try {
+        if ((scannerRef.current as any).isScanning) await scannerRef.current.stop();
         scannerRef.current.clear();
-      } catch {}
-      scannerRef.current = null;
+      } catch (e) {
+        console.log(e);
+      }
     }
 
     setCameraAtiva(null);
@@ -331,13 +282,15 @@ export default function CadastroPage() {
 
     try {
       // 1. Upload da Foto (Se houver)
-      let fotoPath = null;
+      let fotoPath: string | null = null;
       if (foto.file) {
         const path = `produtos/${formData.codigo_peca}_${Date.now()}.jpg`;
         await supabase.storage.from('produtos').upload(path, foto.file, { upsert: true });
 
-        // IMPORTANTE: para bucket private, gravar o PATH (não publicUrl). Seu dashboard já assina.
-        fotoPath = path;
+        // Se seu bucket é PRIVATE, getPublicUrl não serve; mas mantendo sua lógica original.
+        // Se estiver private, você vai assinar (createSignedUrl) na listagem.
+        const { data: pubUrl } = supabase.storage.from('produtos').getPublicUrl(path);
+        fotoPath = pubUrl.publicUrl;
       }
 
       // 2. Criar Produto (Tabela Única)
@@ -365,12 +318,12 @@ export default function CadastroPage() {
       // 3. Criar Estoque (Lista de Tamanhos)
       const dadosEstoque = tamanhos
         .map((t) => ({
-          produto_id: p.id,
+          produto_id: (p as any).id,
           tamanho_id: t.tamanho_id,
           quantidade: Math.max(0, parseInt(String(t.qtd)) || 0),
           codigo_barras: t.ean?.trim() ? t.ean.trim() : null,
         }))
-        .filter((t) => t.tamanho_id); // Remove vazios
+        .filter((t) => t.tamanho_id);
 
       if (dadosEstoque.length > 0) {
         const { error: estErr } = await supabase.from('estoque').insert(dadosEstoque);
@@ -378,10 +331,12 @@ export default function CadastroPage() {
       }
 
       alert('Produto cadastrado com sucesso!');
-      router.replace(backHref); // volta mantendo filtros
+
+      // VOLTAR mantendo os filtros persistidos (querystring do dashboard)
+      router.push(`/${dashQS}`);
     } catch (err: any) {
       console.error(err);
-      alert('Erro: ' + (err?.message || 'Falha ao salvar'));
+      alert('Erro: ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -394,9 +349,9 @@ export default function CadastroPage() {
           UPFITNESS <span className="font-light tracking-normal text-white/80">Cadastro</span>
         </h1>
 
-        {/* VOLTAR preservando querystring */}
+        {/* VOLTAR mantendo query string */}
         <Link
-          href={backHref}
+          href={`/${dashQS}`}
           className="bg-black/20 hover:bg-black/40 px-4 py-2 rounded-full text-white text-[10px] font-bold tracking-widest transition-colors border border-white/10 active:scale-95"
         >
           VOLTAR
@@ -407,7 +362,9 @@ export default function CadastroPage() {
         <form onSubmit={salvar} className="space-y-8">
           {/* SEÇÃO 1: IDENTIFICAÇÃO E FOTO */}
           <section className="bg-slate-900 p-6 rounded-[2rem] border border-slate-800 shadow-xl">
-            <h2 className="text-sm font-black text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">Identificação do Item</h2>
+            <h2 className="text-sm font-black text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">
+              Identificação do Item
+            </h2>
 
             <div className="flex flex-col md:flex-row gap-6">
               {/* FOTO - CLICÁVEL */}
@@ -426,7 +383,11 @@ export default function CadastroPage() {
                       <span className="text-[9px] font-black uppercase tracking-widest">Add Foto</span>
                     </>
                   )}
-                  {foto.preview && <div className="absolute inset-x-0 bottom-0 bg-black/60 text-[8px] font-bold text-white py-1 text-center">ALTERAR</div>}
+                  {foto.preview && (
+                    <div className="absolute inset-x-0 bottom-0 bg-black/60 text-[8px] font-bold text-white py-1 text-center">
+                      ALTERAR
+                    </div>
+                  )}
                 </button>
               </div>
 
@@ -510,7 +471,9 @@ export default function CadastroPage() {
 
           {/* SEÇÃO 2: FINANCEIRO */}
           <section className="bg-slate-900 p-6 rounded-[2rem] border border-slate-800 shadow-xl space-y-6">
-            <h2 className="text-sm font-black text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">Precificação</h2>
+            <h2 className="text-sm font-black text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">
+              Precificação
+            </h2>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
               <div className="relative group">
                 <span className="absolute left-3 top-3 text-xs text-slate-500 font-bold">R$</span>
@@ -522,7 +485,9 @@ export default function CadastroPage() {
                   className="w-full bg-slate-950 text-base md:text-sm font-bold py-3 pl-8 pr-2 rounded-xl border border-slate-800 focus:border-pink-500 outline-none text-white h-12"
                   placeholder="0,00"
                 />
-                <span className="absolute right-2 top-1 text-[8px] text-slate-600 uppercase font-black pointer-events-none bg-slate-950 px-1">Custo</span>
+                <span className="absolute right-2 top-1 text-[8px] text-slate-600 uppercase font-black pointer-events-none bg-slate-950 px-1">
+                  Custo
+                </span>
               </div>
 
               <div className="relative group">
@@ -535,7 +500,9 @@ export default function CadastroPage() {
                   className="w-full bg-slate-950 text-base md:text-sm font-bold py-3 pl-8 pr-2 rounded-xl border border-slate-800 focus:border-pink-500 outline-none text-slate-300 h-12"
                   placeholder="0,00"
                 />
-                <span className="absolute right-2 top-1 text-[8px] text-slate-600 uppercase font-black pointer-events-none bg-slate-950 px-1">Frete</span>
+                <span className="absolute right-2 top-1 text-[8px] text-slate-600 uppercase font-black pointer-events-none bg-slate-950 px-1">
+                  Frete
+                </span>
               </div>
 
               <div className="relative group col-span-2 md:col-span-1">
@@ -548,7 +515,9 @@ export default function CadastroPage() {
                   className="w-full bg-slate-950 text-base md:text-sm font-bold py-3 pl-8 pr-2 rounded-xl border border-slate-800 focus:border-pink-500 outline-none text-slate-300 h-12"
                   placeholder="0,00"
                 />
-                <span className="absolute right-2 top-1 text-[8px] text-slate-600 uppercase font-black pointer-events-none bg-slate-950 px-1">Emb.</span>
+                <span className="absolute right-2 top-1 text-[8px] text-slate-600 uppercase font-black pointer-events-none bg-slate-950 px-1">
+                  Emb.
+                </span>
               </div>
             </div>
 
@@ -587,7 +556,10 @@ export default function CadastroPage() {
 
           {/* SEÇÃO 3: GRADE DE TAMANHOS */}
           <section className="bg-slate-900 p-6 rounded-[2rem] border border-slate-800 shadow-xl">
-            <h2 className="text-sm font-black text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">Grade de Tamanhos</h2>
+            <h2 className="text-sm font-black text-slate-500 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">
+              Grade de Tamanhos
+            </h2>
+
             <div className="space-y-3">
               {tamanhos.map((t, idx) => (
                 <div
@@ -650,7 +622,7 @@ export default function CadastroPage() {
                     onClick={() => {
                       const n = [...tamanhos];
                       n.splice(idx, 1);
-                      setTamanhos(n.length ? n : [{ tamanho_id: '', qtd: 0, ean: '' }]);
+                      setTamanhos(n);
                     }}
                     className="w-10 h-10 flex items-center justify-center text-slate-600 hover:text-red-500 font-bold bg-slate-900 rounded-lg border border-slate-800"
                   >
@@ -753,7 +725,10 @@ export default function CadastroPage() {
           ) : (
             <div className="w-full max-w-sm flex flex-col gap-4">
               <h3 className="text-white text-center font-black uppercase tracking-widest text-sm">Ler Código de Barras</h3>
-              <div id="reader-cadastro-direct" className="w-full h-64 bg-black rounded-3xl overflow-hidden border-2 border-blue-500 shadow-2xl" />
+              <div
+                id="reader-cadastro-direct"
+                className="w-full h-64 bg-black rounded-3xl overflow-hidden border-2 border-blue-500 shadow-2xl"
+              ></div>
               <button
                 onClick={fecharCamera}
                 className="bg-slate-800 text-white py-4 rounded-2xl font-black uppercase tracking-widest text-xs active:scale-95"

@@ -1,12 +1,12 @@
-// src/app/venda/page.tsx
 'use client';
 
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, Suspense } from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
 import { supabase } from '../../lib/supabase';
 import { Html5Qrcode } from 'html5-qrcode';
 import Cropper from 'react-easy-crop';
+import { useSearchParams } from 'next/navigation';
+
 // IMPORTANTE: Verifique se o caminho do componente está correto
 import ReciboModal from '../components/ReciboModal';
 
@@ -56,8 +56,8 @@ const playBeep = () => {
   const audio = new Audio('https://www.soundjay.com/buttons/beep-01a.mp3');
   audio.volume = 0.5;
   audio.play().catch(() => {});
-  if (typeof window !== 'undefined' && window.navigator && window.navigator.vibrate) {
-    window.navigator.vibrate(50);
+  if (typeof window !== 'undefined' && window.navigator && (window.navigator as any).vibrate) {
+    (window.navigator as any).vibrate(50);
   }
 };
 
@@ -80,12 +80,26 @@ async function getCroppedImg(imageSrc: string, pixelCrop: AreaCrop): Promise<Blo
   await new Promise((resolve) => {
     image.onload = resolve;
   });
+
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('No 2d context');
+
   canvas.width = pixelCrop.width;
   canvas.height = pixelCrop.height;
-  ctx.drawImage(image, pixelCrop.x, pixelCrop.y, pixelCrop.width, pixelCrop.height, 0, 0, pixelCrop.width, pixelCrop.height);
+
+  ctx.drawImage(
+    image,
+    pixelCrop.x,
+    pixelCrop.y,
+    pixelCrop.width,
+    pixelCrop.height,
+    0,
+    0,
+    pixelCrop.width,
+    pixelCrop.height
+  );
+
   return new Promise((resolve) => {
     canvas.toBlob((blob) => {
       if (blob) resolve(blob);
@@ -93,13 +107,24 @@ async function getCroppedImg(imageSrc: string, pixelCrop: AreaCrop): Promise<Blo
   });
 }
 
-// Mantém os filtros do Dashboard ao navegar (q, sizes, brand, hideZero)
 function getDashboardQS(searchParams: ReturnType<typeof useSearchParams>) {
   const qs = searchParams?.toString() ?? '';
   return qs ? `?${qs}` : '';
 }
 
+/**
+ * IMPORTANTE (Next.js / Vercel):
+ * useSearchParams() precisa estar dentro de um Suspense boundary.
+ */
 export default function VendaPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-950" />}>
+      <VendaPageInner />
+    </Suspense>
+  );
+}
+
+function VendaPageInner() {
   const searchParams = useSearchParams();
   const dashQS = useMemo(() => getDashboardQS(searchParams), [searchParams]);
 
@@ -118,7 +143,7 @@ export default function VendaPage() {
   const [modalPagamento, setModalPagamento] = useState(false);
   const [itemPendente, setItemPendente] = useState<{ produto: Produto; est: EstoqueItem } | null>(null);
 
-  // NOVOS ESTADOS PARA O RECIBO
+  // RECIBO
   const [mostrarRecibo, setMostrarRecibo] = useState(false);
   const [dadosRecibo, setDadosRecibo] = useState<any>(null);
 
@@ -143,10 +168,11 @@ export default function VendaPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Assinatura de Fotos
+  // Assinatura de Fotos (para bucket privado)
   useEffect(() => {
     (async () => {
       const pathsToSign = new Set<string>();
+
       carrinho.forEach((item) => {
         if (item.foto && !signedMap[item.foto]) pathsToSign.add(item.foto);
       });
@@ -164,18 +190,22 @@ export default function VendaPage() {
           if (data?.signedUrl) newSigned[original] = data.signedUrl;
         }
       }
+
       if (Object.keys(newSigned).length > 0) setSignedMap((prev) => ({ ...prev, ...newSigned }));
     })();
   }, [carrinho, modalSelecao, itemPendente, signedMap]);
 
+  // Recalcula valor final conforme desconto
   useEffect(() => {
     const totalBrutoCalc = carrinho.reduce((acc, item) => acc + item.preco * item.qtd, 0);
     let final = totalBrutoCalc;
+
     if (pagamento.descontoTipo === 'reais') {
       final = totalBrutoCalc - pagamento.descontoValor;
     } else {
       final = totalBrutoCalc - totalBrutoCalc * (pagamento.descontoValor / 100);
     }
+
     setPagamento((prev) => ({ ...prev, valorFinal: Math.max(0, final) }));
   }, [carrinho, pagamento.descontoTipo, pagamento.descontoValor]);
 
@@ -185,8 +215,10 @@ export default function VendaPage() {
       const elementId = 'reader-venda-direct';
       const t = setTimeout(() => {
         if (!document.getElementById(elementId)) return;
+
         const html5QrCode = new Html5Qrcode(elementId);
         scannerRef.current = html5QrCode;
+
         html5QrCode
           .start(
             { facingMode: 'environment' },
@@ -202,6 +234,7 @@ export default function VendaPage() {
             setMostrarScanner(false);
           });
       }, 300);
+
       return () => clearTimeout(t);
     }
   }, [mostrarScanner]);
@@ -209,7 +242,7 @@ export default function VendaPage() {
   const fecharScanner = async () => {
     if (scannerRef.current) {
       try {
-        if (scannerRef.current.isScanning) await scannerRef.current.stop();
+        if ((scannerRef.current as any).isScanning) await scannerRef.current.stop();
         scannerRef.current.clear();
       } catch (e) {
         console.log(e);
@@ -223,18 +256,20 @@ export default function VendaPage() {
       .from('produtos')
       .select(
         `
-        id, codigo_peca, sku_fornecedor, descricao, cor, foto_url, preco_venda, 
+        id, codigo_peca, sku_fornecedor, descricao, cor, foto_url, preco_venda,
         preco_compra, custo_frete, custo_embalagem,
         estoque ( id, quantidade, codigo_barras, tamanho:tamanhos(nome, ordem) )
       `
       )
       .eq('descontinuado', false);
+
     if (data) setProdutos(data as any);
   }
 
   function buscarPorEAN(codigo: string) {
     const codigoLimpo = codigo.trim();
     if (!codigoLimpo) return false;
+
     for (const p of produtos) {
       const estoqueEncontrado = p.estoque.find((e) => e.codigo_barras === codigoLimpo);
       if (estoqueEncontrado) {
@@ -271,7 +306,9 @@ export default function VendaPage() {
     }
 
     if (jaNoCarrinho) {
-      setCarrinho((prev) => prev.map((item) => (item.estoque_id === est.id ? { ...item, qtd: item.qtd + 1 } : item)));
+      setCarrinho((prev) =>
+        prev.map((item) => (item.estoque_id === est.id ? { ...item, qtd: item.qtd + 1 } : item))
+      );
     } else {
       const custoTotalItem = (produto.preco_compra || 0) + (produto.custo_frete || 0) + (produto.custo_embalagem || 0);
 
@@ -289,32 +326,38 @@ export default function VendaPage() {
         foto: produto.foto_url,
         ean: est.codigo_barras,
       };
+
       setCarrinho((prev) => [...prev, novoItem]);
     }
+
     setItemPendente(null);
   }
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
     const reader = new FileReader();
     reader.addEventListener('load', () => setImgSrc(reader.result?.toString() || ''));
     reader.readAsDataURL(file);
     e.target.value = '';
   };
 
-  const onCropComplete = useCallback((_: any, croppedAreaPixelsArg: AreaCrop) => {
-    setCroppedAreaPixels(croppedAreaPixelsArg);
+  const onCropComplete = useCallback((_: any, croppedAreaPixels_: AreaCrop) => {
+    setCroppedAreaPixels(croppedAreaPixels_);
   }, []);
 
   const processarRecorte = async () => {
     if (!imgSrc || !croppedAreaPixels) return;
     setLendoArquivo(true);
+
     try {
       const croppedBlob = await getCroppedImg(imgSrc, croppedAreaPixels);
       const croppedFile = new File([croppedBlob], 'temp.jpg', { type: 'image/jpeg' });
+
       const html5QrCode = new Html5Qrcode('reader-hidden');
       const decodedText = await html5QrCode.scanFileV2(croppedFile, true);
+
       if (decodedText) handleScanSucesso(decodedText.decodedText);
       else alert('Código não identificado.');
     } catch {
@@ -333,6 +376,7 @@ export default function VendaPage() {
   const produtosFiltrados = useMemo(() => {
     const q = busca.toLowerCase().trim();
     if (!q) return [];
+
     return produtos
       .filter((p) => {
         const matchTexto =
@@ -399,30 +443,33 @@ export default function VendaPage() {
     });
 
     setLoading(false);
+
     if (error) {
       alert('Erro: ' + error.message);
-    } else {
-      const dadosParaRecibo = {
-        itens: carrinho.map((i) => ({
-          descricao: i.descricao,
-          quantidade: i.qtd,
-          preco_venda: i.preco,
-          tamanho: i.tamanho,
-        })),
-        subtotal: totalBruto,
-        desconto: totalBruto - pagamento.valorFinal,
-        totalFinal: pagamento.valorFinal,
-        metodoPagamento: pagamento.metodo,
-        data: new Date(),
-      };
-
-      setDadosRecibo(dadosParaRecibo);
-      setMostrarRecibo(true);
-      setModalPagamento(false);
-      setCarrinho([]);
-      setAbaMobile('busca');
-      await fetchProdutos();
+      return;
     }
+
+    // SUCESSO: PREPARA O RECIBO E LIMPA O CARRINHO
+    const dadosParaRecibo = {
+      itens: carrinho.map((i) => ({
+        descricao: i.descricao,
+        quantidade: i.qtd,
+        preco_venda: i.preco,
+        tamanho: i.tamanho,
+      })),
+      subtotal: totalBruto,
+      desconto: totalBruto - pagamento.valorFinal,
+      totalFinal: pagamento.valorFinal,
+      metodoPagamento: pagamento.metodo,
+      data: new Date(),
+    };
+
+    setDadosRecibo(dadosParaRecibo);
+    setMostrarRecibo(true);
+    setModalPagamento(false);
+    setCarrinho([]);
+    setAbaMobile('busca');
+    await fetchProdutos();
   }
 
   const handleDescontoInput = (valor: string, tipo: 'reais' | 'porcentagem' | 'final') => {
@@ -442,12 +489,16 @@ export default function VendaPage() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col md:flex-row overflow-hidden relative">
-      <div id="reader-hidden" className="hidden" />
+      <div id="reader-hidden" className="hidden"></div>
 
       {/* ÁREA ESQUERDA: BUSCA */}
-      <div className={`flex-1 p-4 md:p-6 flex flex-col gap-4 h-[calc(100vh-80px)] md:h-screen overflow-y-auto ${abaMobile === 'carrinho' ? 'hidden md:flex' : 'flex'}`}>
+      <div
+        className={`flex-1 p-4 md:p-6 flex flex-col gap-4 h-[calc(100vh-80px)] md:h-screen overflow-y-auto ${
+          abaMobile === 'carrinho' ? 'hidden md:flex' : 'flex'
+        }`}
+      >
         <header className="flex items-center gap-4">
-          {/* VOLTAR preservando filtros do dashboard */}
+          {/* VOLTAR mantendo querystring */}
           <Link href={`/${dashQS}`} className="bg-slate-800 p-3 rounded-full hover:bg-slate-700 transition active:scale-95">
             ←
           </Link>
@@ -474,8 +525,11 @@ export default function VendaPage() {
             >
               📷 <span className="hidden min-[350px]:inline">Câmera</span>
             </button>
+
             <label
-              className={`flex-1 bg-slate-800 hover:bg-slate-700 text-white h-14 rounded-2xl flex items-center justify-center text-sm font-bold uppercase tracking-widest border-2 border-slate-800 hover:border-blue-500 transition-all shadow-xl cursor-pointer active:scale-95 gap-2 ${lendoArquivo ? 'animate-pulse bg-blue-900' : ''}`}
+              className={`flex-1 bg-slate-800 hover:bg-slate-700 text-white h-14 rounded-2xl flex items-center justify-center text-sm font-bold uppercase tracking-widest border-2 border-slate-800 hover:border-blue-500 transition-all shadow-xl cursor-pointer active:scale-95 gap-2 ${
+                lendoArquivo ? 'animate-pulse bg-blue-900' : ''
+              }`}
             >
               {lendoArquivo ? '⏳' : '📂'} <span className="hidden min-[350px]:inline">Foto</span>
               <input type="file" accept="image/*" className="hidden" onChange={handleFileUpload} />
@@ -521,12 +575,18 @@ export default function VendaPage() {
             <span className="text-[10px] text-slate-500 font-bold uppercase">Total ({qtdItensCarrinho} itens)</span>
             <span className="text-2xl font-black text-white">{formatBRL(totalBruto)}</span>
           </div>
-          <button className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95">Ver Carrinho →</button>
+          <button className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95">
+            Ver Carrinho →
+          </button>
         </div>
       </div>
 
       {/* ÁREA DIREITA: CARRINHO */}
-      <div className={`w-full md:w-[420px] bg-slate-900 md:border-l border-slate-800 flex flex-col h-screen md:sticky md:top-0 shadow-2xl z-20 ${abaMobile === 'busca' ? 'hidden md:flex' : 'flex fixed inset-0'}`}>
+      <div
+        className={`w-full md:w-[420px] bg-slate-900 md:border-l border-slate-800 flex flex-col h-screen md:sticky md:top-0 shadow-2xl z-20 ${
+          abaMobile === 'busca' ? 'hidden md:flex' : 'flex fixed inset-0'
+        }`}
+      >
         <div className="p-6 bg-slate-950/95 backdrop-blur-md border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button onClick={() => setAbaMobile('busca')} className="md:hidden bg-slate-800 p-2 rounded-full text-slate-300">
@@ -540,7 +600,10 @@ export default function VendaPage() {
 
         <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-950/30">
           {carrinho.map((item) => (
-            <div key={item.tempId} className="bg-slate-900 p-3 rounded-2xl border border-slate-800 flex gap-3 relative group hover:border-slate-600 transition-colors shadow-sm">
+            <div
+              key={item.tempId}
+              className="bg-slate-900 p-3 rounded-2xl border border-slate-800 flex gap-3 relative group hover:border-slate-600 transition-colors shadow-sm"
+            >
               <div className="w-16 h-16 rounded-xl bg-slate-800 overflow-hidden border border-slate-700 flex-shrink-0">
                 {item.foto && signedMap[item.foto] ? (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -577,12 +640,15 @@ export default function VendaPage() {
                 <span className="font-black text-sm text-emerald-400">{formatBRL(item.preco * item.qtd)}</span>
               </div>
 
-              <button onClick={() => removerItem(item.tempId)} className="absolute -top-2 -right-2 bg-red-600 text-white w-7 h-7 rounded-full text-[10px] font-bold shadow-lg flex items-center justify-center z-10 active:scale-90">
+              <button
+                onClick={() => removerItem(item.tempId)}
+                className="absolute -top-2 -right-2 bg-red-600 text-white w-7 h-7 rounded-full text-[10px] font-bold shadow-lg flex items-center justify-center z-10 active:scale-90"
+              >
                 ✕
               </button>
             </div>
           ))}
-          <div className="h-20" />
+          <div className="h-20"></div>
         </div>
 
         <div className="p-6 bg-slate-950 border-t border-slate-800 space-y-4 shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-50">
@@ -702,6 +768,7 @@ export default function VendaPage() {
             <div className="flex-1 overflow-y-auto p-6 space-y-8">
               <div className="space-y-4">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Desconto / Ajuste</label>
+
                 <div className="grid grid-cols-1 min-[400px]:grid-cols-2 gap-4">
                   <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 flex items-center gap-3">
                     <span className="text-pink-500 font-bold">%</span>
@@ -800,7 +867,7 @@ export default function VendaPage() {
         <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-6 backdrop-blur-md">
           <div className="w-full max-w-sm bg-slate-900 p-6 rounded-3xl border border-slate-800 shadow-2xl relative">
             <h3 className="text-center font-black uppercase text-white mb-4 text-sm">Aponte para o Código</h3>
-            <div id="reader-venda-direct" className="w-full rounded-2xl overflow-hidden border-2 border-pink-500 bg-black h-64" />
+            <div id="reader-venda-direct" className="w-full rounded-2xl overflow-hidden border-2 border-pink-500 bg-black h-64"></div>
             <button onClick={fecharScanner} className="mt-6 w-full bg-slate-800 text-white py-4 rounded-xl font-bold uppercase tracking-widest">
               Fechar
             </button>
@@ -814,6 +881,7 @@ export default function VendaPage() {
           <div className="relative w-full h-full bg-black">
             <Cropper image={imgSrc} crop={crop} zoom={zoom} aspect={3 / 2} onCropChange={setCrop} onCropComplete={onCropComplete} onZoomChange={setZoom} />
           </div>
+
           <div className="absolute bottom-0 left-0 right-0 p-6 z-50 flex flex-col gap-4 bg-black/80 backdrop-blur-md pb-10">
             <p className="text-center text-xs text-slate-300">Ajuste o código de barras</p>
             <input type="range" value={zoom} min={1} max={3} step={0.1} onChange={(e) => setZoom(Number(e.target.value))} className="w-full accent-pink-500 h-10" />
@@ -829,7 +897,7 @@ export default function VendaPage() {
         </div>
       )}
 
-      {/* NOVO: MODAL DE RECIBO */}
+      {/* MODAL DE RECIBO */}
       <ReciboModal visivel={mostrarRecibo} dados={dadosRecibo} onClose={() => setMostrarRecibo(false)} />
     </div>
   );
