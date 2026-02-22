@@ -61,6 +61,9 @@ export default function Dashboard() {
   const [mostrarScanner, setMostrarScanner] = useState(false);
   const [mostrarFiltros, setMostrarFiltros] = useState(false);
 
+  // ✅ NOVO: controla foco do input para esconder a nav inferior quando teclado abre (iOS)
+  const [inputFocado, setInputFocado] = useState(false);
+
   // FILTROS
   const [tamanhosSelecionados, setTamanhosSelecionados] = useState<string[]>([]);
   const [esconderZerados, setEsconderZerados] = useState(false);
@@ -69,12 +72,8 @@ export default function Dashboard() {
   const dataFetchedRef = useRef(false);
   const restoredScrollRef = useRef(false);
 
-  // Scanner: evita importar html5-qrcode no topo (quebra prerender/build em alguns ambientes)
+  // Scanner: evita importar html5-qrcode no topo
   const scannerRef = useRef<any>(null);
-
-  // HEADER height (para sticky search não ficar escondida)
-  const headerRef = useRef<HTMLElement | null>(null);
-  const [headerH, setHeaderH] = useState<number>(104); // fallback
 
   // Keys (sessionStorage)
   const scrollKey = 'dashboard:scrollY';
@@ -88,56 +87,30 @@ export default function Dashboard() {
     signedMapRef.current = signedMap;
   }, [signedMap]);
 
-  // --- mede altura real do header (robusto em qualquer device / zoom) ---
-  useEffect(() => {
-    const el = headerRef.current;
-    if (!el) return;
-
-    const measure = () => {
-      const h = Math.round(el.getBoundingClientRect().height || 104);
-      if (h > 0) setHeaderH(h);
-    };
-
-    measure();
-
-    const ro = new ResizeObserver(() => measure());
-    ro.observe(el);
-
-    window.addEventListener('resize', measure);
-    window.addEventListener('orientationchange', measure);
-
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('resize', measure);
-      window.removeEventListener('orientationchange', measure);
-    };
-  }, []);
-
   // --- 1) Inicializa filtros a partir da URL (querystring) ---
-// ✅ sem useSearchParams (evita exigência de Suspense no build)
-useEffect(() => {
-  // garante client-only
-  if (typeof window === 'undefined') return;
+  // ✅ sem useSearchParams (evita exigência de Suspense no build)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
 
-  const sp = new URLSearchParams(window.location.search);
+    const sp = new URLSearchParams(window.location.search);
 
-  const q = sp.get('q') ?? '';
-  const sizesRaw = sp.get('sizes') ?? '';
-  const brand = sp.get('brand') ?? '';
-  const hideZero = sp.get('hideZero') === '1';
+    const q = sp.get('q') ?? '';
+    const sizesRaw = sp.get('sizes') ?? '';
+    const brand = sp.get('brand') ?? '';
+    const hideZero = sp.get('hideZero') === '1';
 
-  const sizes = sizesRaw
-    ? sizesRaw
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
+    const sizes = sizesRaw
+      ? sizesRaw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
 
-  setBusca(q);
-  setFornecedorSelecionado(brand);
-  setEsconderZerados(hideZero);
-  setTamanhosSelecionados(sizes);
-}, []);
+    setBusca(q);
+    setFornecedorSelecionado(brand);
+    setEsconderZerados(hideZero);
+    setTamanhosSelecionados(sizes);
+  }, []);
 
   // --- 2) Mantém URL sincronizada com filtros/busca ---
   useEffect(() => {
@@ -158,11 +131,11 @@ useEffect(() => {
 
     const href = qs ? `/?${qs}` : '/';
 
-      // ✅ evita replace repetido do mesmo href
-  if (typeof window !== 'undefined') {
-    const current = window.location.pathname + window.location.search;
-    if (current === href) return;
-  }
+    // ✅ evita replace repetido do mesmo href
+    if (typeof window !== 'undefined') {
+      const current = window.location.pathname + window.location.search;
+      if (current === href) return;
+    }
 
     router.replace(href);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -371,8 +344,7 @@ useEffect(() => {
     return params.toString();
   }, [busca, tamanhosSelecionados, fornecedorSelecionado, esconderZerados]);
 
-  // --- SCANNER: start/stop + suporte real a CÓDIGO DE BARRAS (EAN/UPC/Code128) ---
-  // ✅ Correção: html5-qrcode via dynamic import (evita quebrar prerender/build)
+  // --- SCANNER: start/stop + suporte real a CÓDIGO DE BARRAS ---
   useEffect(() => {
     if (!mostrarScanner) return;
 
@@ -388,7 +360,7 @@ useEffect(() => {
         }
       } catch {}
       try {
-        s.clear?.(); // clear() é void
+        s.clear?.();
       } catch {}
     };
 
@@ -399,13 +371,10 @@ useEffect(() => {
       const el = document.getElementById(elementId);
       if (!el) return;
 
-      // limpa container (evita “já existe um scanner”)
       el.innerHTML = '';
 
-      // encerra scanner anterior, se existir
       await stopAndClear(scannerRef.current);
 
-      // Importa a lib somente no client (no momento de abrir o scanner)
       let Html5Qrcode: any;
       let Formats: any;
       try {
@@ -421,10 +390,9 @@ useEffect(() => {
       const scanner = new Html5Qrcode(elementId);
       scannerRef.current = scanner;
 
-      // Configs otimizadas p/ código de barras
       const config: any = {
         fps: 12,
-        qrbox: { width: 320, height: 140 }, // retângulo mais "largo" p/ EAN/Code128
+        qrbox: { width: 320, height: 140 },
         aspectRatio: 1.777,
         disableFlip: true,
         formatsToSupport: [
@@ -436,7 +404,6 @@ useEffect(() => {
           Formats.CODE_39,
           Formats.ITF,
         ],
-        // quando disponível, usa BarcodeDetector nativo (melhor e mais rápido em mobile)
         experimentalFeatures: { useBarCodeDetectorIfSupported: true },
       };
 
@@ -450,10 +417,7 @@ useEffect(() => {
             const cleaned = String(decodedText || '').trim();
             if (!cleaned) return;
 
-            // seta busca com o código lido
             setBusca(cleaned);
-
-            // fecha e limpa
             setMostrarScanner(false);
             await stopAndClear(scanner);
           },
@@ -486,13 +450,8 @@ useEffect(() => {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans pb-44">
-      {/* HEADER */}
-      <header
-        ref={(n) => {
-          headerRef.current = n;
-        }}
-        className="px-6 pt-10 pb-6 bg-slate-950 border-b border-slate-900 flex justify-between items-end sticky top-0 z-50 backdrop-blur-md"
-      >
+      {/* HEADER (✅ não é mais sticky; rola junto com a página) */}
+      <header className="px-6 pt-10 pb-6 bg-slate-950 border-b border-slate-900 flex justify-between items-end backdrop-blur-md">
         <div>
           <p className="text-[10px] font-black tracking-[0.3em] text-pink-500 uppercase mb-1">UpFitness App</p>
           <h1 className="text-2xl font-black italic tracking-tighter uppercase">
@@ -529,20 +488,22 @@ useEffect(() => {
       </header>
 
       <main className="px-4 pt-0">
-        {/* BARRA DE BUSCA FIXA (sticky, sem ficar escondida) */}
+        {/* BARRA DE BUSCA FIXA (✅ apenas ela fica sticky no topo) */}
         <div
           className="sticky z-[60] -mx-4 px-4 pt-4 pb-4 bg-slate-950/90 backdrop-blur-md border-b border-slate-900"
           style={{
-            top: `calc(env(safe-area-inset-top, 0px) + ${headerH}px)`,
+            top: `env(safe-area-inset-top, 0px)`,
           }}
         >
           <div className="relative">
             <input
               type="text"
               placeholder="Buscar por nome, cor, código ou marca..."
-              className="w-full pl-5 pr-12 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-pink-500 transition-all shadow-lg placeholder:text-slate-600 text-base font-bold"
+              className="w-full pl-5 pr-12 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-pink-500 transition-all shadow-lg placeholder:text-slate-600 text-base md:text-sm font-bold"
               value={busca}
               onChange={(e) => setBusca(e.target.value)}
+              onFocus={() => setInputFocado(true)}
+              onBlur={() => setInputFocado(false)}
             />
             <button
               onClick={() => setMostrarScanner(true)}
@@ -650,11 +611,12 @@ useEffect(() => {
       {/* FAB FILTRO */}
       <button
         onClick={() => setMostrarFiltros(true)}
-        className={`fixed bottom-32 right-6 w-14 h-14 rounded-2xl flex items-center justify-center z-[70] shadow-2xl transition-all active:scale-90 border-2 ${
+        className={`fixed right-6 w-14 h-14 rounded-2xl flex items-center justify-center z-[70] shadow-2xl transition-all active:scale-90 border-2 ${
           tamanhosSelecionados.length > 0 || fornecedorSelecionado || esconderZerados
             ? 'bg-pink-600 border-pink-400 text-white animate-pulse'
             : 'bg-slate-900 border-slate-800 text-slate-400'
         }`}
+        style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + 112px)` }}
         aria-label="Filtros"
       >
         <div className="relative">
@@ -749,35 +711,40 @@ useEffect(() => {
         </div>
       )}
 
-      {/* NAV FLUTUANTE */}
-      <div className="fixed bottom-10 left-6 right-6 z-[60]">
-        <nav className="bg-slate-900/95 backdrop-blur-2xl border border-white/5 rounded-[2.5rem] h-20 px-6 flex items-center justify-around shadow-2xl">
-          <Link href="/" className="flex flex-col items-center gap-1">
-            <div className="p-2 rounded-2xl bg-pink-500/20 text-pink-500">
-              <span className="text-xl">📦</span>
-            </div>
-            <span className="text-[9px] font-black text-pink-500 uppercase tracking-widest">ESTOQUE</span>
-          </Link>
+      {/* NAV FLUTUANTE (✅ some quando o input está focado / teclado aberto) */}
+      {!inputFocado && (
+        <div
+          className="fixed left-6 right-6 z-[60]"
+          style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + 10px)` }}
+        >
+          <nav className="bg-slate-900/95 backdrop-blur-2xl border border-white/5 rounded-[2.5rem] h-20 px-6 flex items-center justify-around shadow-2xl">
+            <Link href="/" className="flex flex-col items-center gap-1">
+              <div className="p-2 rounded-2xl bg-pink-500/20 text-pink-500">
+                <span className="text-xl">📦</span>
+              </div>
+              <span className="text-[9px] font-black text-pink-500 uppercase tracking-widest">ESTOQUE</span>
+            </Link>
 
-          <Link href={currentQS ? `/venda?${currentQS}` : '/venda'} onClick={() => saveReturnState()} className="flex flex-col items-center gap-1 opacity-40">
-            <div className="p-2">
-              <span className="text-xl">🛒</span>
-            </div>
-            <span className="text-[9px] font-black text-white tracking-widest">VENDA</span>
-          </Link>
+            <Link href={currentQS ? `/venda?${currentQS}` : '/venda'} onClick={() => saveReturnState()} className="flex flex-col items-center gap-1 opacity-40">
+              <div className="p-2">
+                <span className="text-xl">🛒</span>
+              </div>
+              <span className="text-[9px] font-black text-white tracking-widest">VENDA</span>
+            </Link>
 
-          <Link
-            href={currentQS ? `/historico?${currentQS}` : '/historico'}
-            onClick={() => saveReturnState()}
-            className="flex flex-col items-center gap-1 opacity-40"
-          >
-            <div className="p-2">
-              <span className="text-xl">📊</span>
-            </div>
-            <span className="text-[9px] font-black text-white tracking-widest uppercase">Histórico</span>
-          </Link>
-        </nav>
-      </div>
+            <Link
+              href={currentQS ? `/historico?${currentQS}` : '/historico'}
+              onClick={() => saveReturnState()}
+              className="flex flex-col items-center gap-1 opacity-40"
+            >
+              <div className="p-2">
+                <span className="text-xl">📊</span>
+              </div>
+              <span className="text-[9px] font-black text-white tracking-widest uppercase">Histórico</span>
+            </Link>
+          </nav>
+        </div>
+      )}
 
       {/* SCANNER */}
       {mostrarScanner && (
@@ -804,7 +771,9 @@ useEffect(() => {
             <input
               value={busca}
               onChange={(e) => setBusca(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-800 rounded-2xl py-4 px-4 text-white font-bold outline-none"
+              onFocus={() => setInputFocado(true)}
+              onBlur={() => setInputFocado(false)}
+              className="w-full bg-slate-900 border border-slate-800 rounded-2xl py-4 px-4 text-white font-bold outline-none text-base"
               placeholder="Ex: 789..."
             />
           </div>
