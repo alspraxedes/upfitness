@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '../lib/supabase';
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import Image from 'next/image';
 import { getSignedUrlCached } from '../lib/signedUrlCache';
 
@@ -70,7 +69,9 @@ export default function Dashboard() {
 
   const dataFetchedRef = useRef(false);
   const restoredScrollRef = useRef(false);
-  const scannerRef = useRef<Html5Qrcode | null>(null);
+
+  // Scanner: evita importar html5-qrcode no topo (quebra prerender/build em alguns ambientes)
+  const scannerRef = useRef<any>(null);
 
   // HEADER height (para sticky search não ficar escondida)
   const headerRef = useRef<HTMLElement | null>(null);
@@ -159,6 +160,7 @@ export default function Dashboard() {
   // --- Auth + fetch ---
   useEffect(() => {
     let mounted = true;
+
     const init = async () => {
       const { data } = await supabase.auth.getSession();
       if (!data.session) {
@@ -170,7 +172,9 @@ export default function Dashboard() {
         fetchProdutos();
       }
     };
+
     init();
+
     return () => {
       mounted = false;
     };
@@ -357,22 +361,23 @@ export default function Dashboard() {
   }, [busca, tamanhosSelecionados, fornecedorSelecionado, esconderZerados]);
 
   // --- SCANNER: start/stop + suporte real a CÓDIGO DE BARRAS (EAN/UPC/Code128) ---
+  // ✅ Correção: html5-qrcode via dynamic import (evita quebrar prerender/build)
   useEffect(() => {
     if (!mostrarScanner) return;
 
     const elementId = 'reader-dashboard-direct';
     let cancelled = false;
 
-    const stopAndClear = async (s: Html5Qrcode | null) => {
+    const stopAndClear = async (s: any) => {
       if (!s) return;
       try {
-        const maybe = s.stop();
-        if (maybe && typeof (maybe as any).then === 'function') {
-          await (maybe as Promise<void>).catch(() => {});
+        const maybe = s.stop?.();
+        if (maybe && typeof maybe.then === 'function') {
+          await maybe.catch(() => {});
         }
       } catch {}
       try {
-        s.clear(); // clear() é void
+        s.clear?.(); // clear() é void
       } catch {}
     };
 
@@ -389,6 +394,19 @@ export default function Dashboard() {
       // encerra scanner anterior, se existir
       await stopAndClear(scannerRef.current);
 
+      // Importa a lib somente no client (no momento de abrir o scanner)
+      let Html5Qrcode: any;
+      let Formats: any;
+      try {
+        const mod = await import('html5-qrcode');
+        if (cancelled) return;
+        Html5Qrcode = mod.Html5Qrcode;
+        Formats = mod.Html5QrcodeSupportedFormats;
+      } catch (err) {
+        console.error('Falha ao carregar html5-qrcode:', err);
+        return;
+      }
+
       const scanner = new Html5Qrcode(elementId);
       scannerRef.current = scanner;
 
@@ -399,13 +417,13 @@ export default function Dashboard() {
         aspectRatio: 1.777,
         disableFlip: true,
         formatsToSupport: [
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.CODE_39,
-          Html5QrcodeSupportedFormats.ITF,
+          Formats.EAN_13,
+          Formats.EAN_8,
+          Formats.UPC_A,
+          Formats.UPC_E,
+          Formats.CODE_128,
+          Formats.CODE_39,
+          Formats.ITF,
         ],
         // quando disponível, usa BarcodeDetector nativo (melhor e mais rápido em mobile)
         experimentalFeatures: { useBarCodeDetectorIfSupported: true },
@@ -415,7 +433,7 @@ export default function Dashboard() {
         await scanner.start(
           { facingMode: 'environment' },
           config,
-          async (decodedText) => {
+          async (decodedText: string) => {
             if (cancelled) return;
 
             const cleaned = String(decodedText || '').trim();
@@ -439,8 +457,7 @@ export default function Dashboard() {
 
     return () => {
       cancelled = true;
-      const s = scannerRef.current;
-      stopAndClear(s);
+      stopAndClear(scannerRef.current);
     };
   }, [mostrarScanner]);
 
@@ -563,7 +580,6 @@ export default function Dashboard() {
                         fill
                         className="object-cover opacity-90 group-hover:opacity-100 transition-opacity"
                         unoptimized
-                        // melhora sensação de velocidade p/ primeiros itens
                         priority={idx < 6}
                         onError={(e) => {
                           const target = e.target as HTMLImageElement;
