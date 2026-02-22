@@ -33,6 +33,14 @@ function extractPath(url: string | null) {
   }
 }
 
+function guessFilenameFromPath(path: string | null | undefined, fallback = 'foto.jpg') {
+  if (!path) return fallback;
+  const clean = path.split('?')[0];
+  const parts = clean.split('/');
+  const last = parts[parts.length - 1] || fallback;
+  return last.includes('.') ? last : fallback;
+}
+
 export default function DetalheItem({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
 
@@ -53,6 +61,9 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
   const [produto, setProduto] = useState<any>(null);
   const [listaTamanhos, setListaTamanhos] = useState<any[]>([]);
   const [signedUrl, setSignedUrl] = useState<string | null>(null);
+
+  // Download UI
+  const [downloadingFoto, setDownloadingFoto] = useState(false);
 
   const [formData, setFormData] = useState({
     descricao: '',
@@ -105,7 +116,11 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     const { data: tams } = await supabase.from('tamanhos').select('*').order('ordem');
     setListaTamanhos(tams || []);
 
-    const { data, error } = await supabase.from('produtos').select(`*, estoque(*, tamanho:tamanhos(*))`).eq('id', id).single();
+    const { data, error } = await supabase
+      .from('produtos')
+      .select(`*, estoque(*, tamanho:tamanhos(*))`)
+      .eq('id', id)
+      .single();
 
     if (error || !data) {
       alert('Produto não encontrado');
@@ -118,9 +133,9 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
 
     setSignedUrl(null);
     if (data.foto_url) {
-        const signed = await getSignedUrlCached('produtos', data.foto_url, extractPath, 3600);
-        if (signed) setSignedUrl(signed);
-      }
+      const signed = await getSignedUrlCached('produtos', data.foto_url, extractPath, 3600);
+      if (signed) setSignedUrl(signed);
+    }
 
     const custo = (data.preco_compra || 0) + (data.custo_frete || 0) + (data.custo_embalagem || 0);
     const margem = custo > 0 ? ((data.preco_venda - custo) / custo) * 100 : 100;
@@ -140,6 +155,55 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
 
     setLoading(false);
   }
+
+  // --- DOWNLOAD FOTO ORIGINAL (via Storage, se possível) ---
+  const baixarFotoOriginal = async () => {
+    if (!produto?.foto_url) return;
+
+    setDownloadingFoto(true);
+    try {
+      const maybePath = extractPath(produto.foto_url);
+
+      // Preferência: baixar direto do Storage (original), sem recompressão.
+      if (maybePath && (maybePath.includes('/') || maybePath.includes('.'))) {
+        const { data, error } = await supabase.storage.from('produtos').download(maybePath);
+        if (error || !data) throw new Error('Falha ao baixar do storage');
+
+        const blobUrl = URL.createObjectURL(data);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = guessFilenameFromPath(maybePath, `${produto.codigo_peca || 'foto'}.jpg`);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(blobUrl);
+        return;
+      }
+
+      // Fallback: baixar a partir da signedUrl (quando não conseguimos extrair path)
+      if (signedUrl) {
+        const res = await fetch(signedUrl);
+        if (!res.ok) throw new Error('Falha ao baixar a partir da URL');
+        const blob = await res.blob();
+
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `${produto.codigo_peca || 'foto'}.jpg`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(blobUrl);
+        return;
+      }
+
+      alert('Não foi possível baixar a foto.');
+    } catch (e) {
+      alert('Erro ao baixar a foto.');
+    } finally {
+      setDownloadingFoto(false);
+    }
+  };
 
   // --- UPLOAD FOTO ---
   const handleFileChange = async (e: any) => {
@@ -303,7 +367,8 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     };
   }, []);
 
-  if (loading) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-pink-500 font-black animate-pulse">CARREGANDO...</div>;
+  if (loading)
+    return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-pink-500 font-black animate-pulse">CARREGANDO...</div>;
 
   return (
     <div className={`min-h-screen bg-slate-950 text-slate-100 font-sans pb-32 ${formData.descontinuado ? 'grayscale-[0.8]' : ''}`}>
@@ -355,25 +420,46 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
         {/* IDENTIFICAÇÃO E FOTO */}
         <section className="bg-slate-900 p-6 rounded-[2rem] border border-slate-800 shadow-xl flex flex-col md:flex-row gap-6">
           <div className="shrink-0 flex justify-center">
-            <button
-              onClick={() => editando && setModalFoto(true)}
-              className={`w-32 h-32 rounded-3xl bg-slate-950 border-2 border-slate-700 overflow-hidden relative group shadow-lg ${
-                editando ? 'cursor-pointer hover:border-pink-500' : 'cursor-default'
-              }`}
-            >
-              {signedUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={signedUrl} className="w-full h-full object-cover" alt="" />
-              ) : (
-                <span className="text-4xl opacity-30">📷</span>
-              )}
+            <div className="relative">
+              <button
+                onClick={() => editando && setModalFoto(true)}
+                className={`w-32 h-32 rounded-3xl bg-slate-950 border-2 border-slate-700 overflow-hidden relative group shadow-lg ${
+                  editando ? 'cursor-pointer hover:border-pink-500' : 'cursor-default'
+                }`}
+              >
+                {signedUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={signedUrl} className="w-full h-full object-cover" alt="" />
+                ) : (
+                  <span className="text-4xl opacity-30">📷</span>
+                )}
 
-              {editando && (
-                <div className="absolute bottom-0 inset-x-0 bg-black/70 py-1 flex items-center justify-center gap-1 backdrop-blur-sm animate-in fade-in">
-                  <span className="text-[10px] text-white font-bold uppercase tracking-wide">📷 Alterar</span>
-                </div>
+                {editando && (
+                  <div className="absolute bottom-0 inset-x-0 bg-black/70 py-1 flex items-center justify-center gap-1 backdrop-blur-sm animate-in fade-in">
+                    <span className="text-[10px] text-white font-bold uppercase tracking-wide">📷 Alterar</span>
+                  </div>
+                )}
+              </button>
+
+              {/* ÍCONE DE DOWNLOAD (sempre que houver foto) */}
+              {!!produto?.foto_url && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    baixarFotoOriginal();
+                  }}
+                  title={downloadingFoto ? 'Baixando...' : 'Baixar foto original'}
+                  aria-label="Baixar foto original"
+                  className={`absolute -right-2 -top-2 z-10 w-9 h-9 rounded-full border border-slate-700 bg-slate-950/90 backdrop-blur flex items-center justify-center shadow-lg transition
+                    ${downloadingFoto ? 'opacity-70 cursor-wait' : 'hover:border-blue-500 hover:scale-105 active:scale-95'}`}
+                  disabled={downloadingFoto}
+                >
+                  <span className="text-sm">{downloadingFoto ? '⏳' : '⬇️'}</span>
+                </button>
               )}
-            </button>
+            </div>
           </div>
 
           <div className="flex-1 space-y-4">
@@ -600,6 +686,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
         <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center p-4 backdrop-blur-md">
           {fotoTemp ? (
             <div className="w-full max-w-sm flex flex-col gap-4">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={fotoTemp.url} className="rounded-2xl border-2 border-pink-500 shadow-2xl" alt="" />
               <button
                 onClick={() => uploadFoto(blobToFile(fotoTemp.blob, 'cam.jpg'))}
