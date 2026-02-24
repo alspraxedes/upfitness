@@ -436,11 +436,18 @@ function HistoricoPageInner() {
 
               <div className="space-y-3 mb-6">
                 {vendaRecibo.itens_venda.map((item, idx) => (
-                  <div key={idx} className="flex justify-between items-start text-xs">
-                    <div className="pr-2">
-                      <span className="font-bold">{item.quantidade}x</span> {item.descricao_completa}
+                  <div key={idx} className="text-xs">
+                    <div className="flex justify-between items-start">
+                      <div className="pr-2">
+                        <span className="font-bold">{item.quantidade}x</span> {item.descricao_completa}
+                      </div>
+                      <div className="font-bold whitespace-nowrap">{formatBRL(item.subtotal)}</div>
                     </div>
-                    <div className="font-bold whitespace-nowrap">{formatBRL(item.subtotal)}</div>
+
+                    {/* ✅ NOVO: preço unitário */}
+                    <div className="text-[10px] text-slate-500 text-right">
+                      {formatBRL(item.preco_unitario)} un.
+                    </div>
                   </div>
                 ))}
               </div>
