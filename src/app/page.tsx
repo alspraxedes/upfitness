@@ -58,24 +58,16 @@ function normalizeColorText(s: string) {
 }
 
 function cleanColorText(raw: string) {
-  // Remove prefixos típicos do seu padrão:
-  // "C0608 - ...", "E1341.V26 - VESTEM ...", etc.
   let s = normalizeColorText(raw);
 
-  // remove prefixos "E.... - VESTEM "
   s = s.replace(/^[A-Z]\d{3,5}(\.[A-Z0-9]{2,4})?\s*-\s*VESTEM\s+/i, '');
-  // remove prefixos "C0001 - "
   s = s.replace(/^C\s*\d{4}\s*-\s*/i, '');
-  // remove prefixos genéricos "COD/REF"
   s = s.replace(/^(COD|REF)\s*[-\s]?\d{3,6}\s*-\s*/i, '');
-
-  // limpa múltiplos espaços
   s = s.replace(/\s+/g, ' ').trim();
   return s;
 }
 
 function textToHslColor(input: string) {
-  // hash simples e estável (fallback)
   let hash = 0;
   for (let i = 0; i < input.length; i++) hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
   const hue = hash % 360;
@@ -86,27 +78,21 @@ function textToHslColor(input: string) {
 
 type ColorHit = { label: string; color: string };
 
-// Dicionário prático: cobre o padrão atual e cai em fallback para o restante.
-// Você pode adicionar novos termos aqui sem mexer na lógica.
 const COLOR_KEYWORDS: Array<{ keys: string[]; label: string; color: string }> = [
-  // Preto / Branco / Cinza
   { keys: ['PRETO', 'EBANO', 'EBANO ', 'E B A N O', 'COSTAS PRETO', 'TULE PRETO', 'GIRO PRETO', 'CONTORNO PRETO', 'NADADOR PRETO', 'ELASTICO PRETO', 'ESSENTIALS PRETO', 'PRO PRETO'], label: 'PRETO', color: '#0B0F19' },
   { keys: ['BRANCO OPTICO', 'BRANCO ÓPTICO', 'BRANCO', 'OPTICO'], label: 'BRANCO', color: '#F8FAFC' },
   { keys: ['CINZA FERRO', 'FERRO'], label: 'CINZA', color: '#475569' },
   { keys: ['CINZA'], label: 'CINZA', color: '#64748B' },
 
-  // Off-white / creme / manteiga / nude / bege
   { keys: ['OFF WHITE', 'OFFWHITE', 'ECRU', 'ECRU', 'ECRU ', 'OFF WHITE/ECRU'], label: 'OFF WHITE', color: '#EEE7D8' },
   { keys: ['CREME'], label: 'CREME', color: '#E9DFCF' },
   { keys: ['MANTEIGA'], label: 'MANTEIGA', color: '#F1E3B5' },
   { keys: ['NUDE'], label: 'NUDE', color: '#D6B9A8' },
 
-  // Marrom
   { keys: ['MARROM COFFEE', 'COFFEE'], label: 'COFFEE', color: '#4B2E2A' },
   { keys: ['MARROM NOBRE'], label: 'MARROM', color: '#5A3A2E' },
   { keys: ['MARROM'], label: 'MARROM', color: '#6B4E3D' },
 
-  // Vermelho / Vinho
   { keys: ['VERMELHO DESEJO', 'DESEJO'], label: 'VERMELHO', color: '#C0262D' },
   { keys: ['VERMELHO VIBRANTE', 'VIBRANTE'], label: 'VERMELHO', color: '#E11D48' },
   { keys: ['VERMELHO GRENADINE', 'GRENADINE'], label: 'VERMELHO', color: '#BE123C' },
@@ -114,7 +100,6 @@ const COLOR_KEYWORDS: Array<{ keys: string[]; label: string; color: string }> = 
   { keys: ['VINHO'], label: 'VINHO', color: '#7F1D1D' },
   { keys: ['VERMELHO'], label: 'VERMELHO', color: '#B91C1C' },
 
-  // Rosa / Lilás / Roxo
   { keys: ['ROSA AURORA', 'AURORA'], label: 'ROSA', color: '#F472B6' },
   { keys: ['ROSA DOCE', 'DOCE'], label: 'ROSA', color: '#FB7185' },
   { keys: ['ROSA PASTEL', 'PASTEL'], label: 'ROSA', color: '#FDA4AF' },
@@ -128,7 +113,6 @@ const COLOR_KEYWORDS: Array<{ keys: string[]; label: string; color: string }> = 
   { keys: ['ROXO'], label: 'ROXO', color: '#7C3AED' },
   { keys: ['ROSA'], label: 'ROSA', color: '#DB2777' },
 
-  // Azul / Marinho / Jeans
   { keys: ['MARINHO ESCURIDAO', 'MARINHO', 'NOTURNO', 'JAGUAR NOTURNO'], label: 'MARINHO', color: '#0F2A4A' },
   { keys: ['AZUL JEANS', 'JEANS', 'DENIM'], label: 'JEANS', color: '#1D4ED8' },
   { keys: ['AZUL SUBMARINE', 'SUBMARINE'], label: 'AZUL', color: '#0E7490' },
@@ -141,7 +125,6 @@ const COLOR_KEYWORDS: Array<{ keys: string[]; label: string; color: string }> = 
   { keys: ['AZUL LAGOA', 'LAGOA'], label: 'AZUL', color: '#22D3EE' },
   { keys: ['AZUL'], label: 'AZUL', color: '#2563EB' },
 
-  // Verde
   { keys: ['VERDE HERA', 'HERA'], label: 'VERDE', color: '#16A34A' },
   { keys: ['VERDE MENTA', 'MENTA'], label: 'MENTA', color: '#34D399' },
   { keys: ['VERDE MINT', 'MINT'], label: 'MINT', color: '#22C55E' },
@@ -154,12 +137,10 @@ const COLOR_KEYWORDS: Array<{ keys: string[]; label: string; color: string }> = 
   { keys: ['VERDE ESCURO', 'ESCURO'], label: 'VERDE', color: '#14532D' },
   { keys: ['VERDE'], label: 'VERDE', color: '#16A34A' },
 
-  // Amarelo / Mostarda
   { keys: ['AMARELO NEON', 'NEON'], label: 'AMARELO', color: '#FACC15' },
   { keys: ['MOSTARDA DIJON', 'MOSTARDA', 'DIJON'], label: 'MOSTARDA', color: '#EAB308' },
   { keys: ['AMARELO'], label: 'AMARELO', color: '#F59E0B' },
 
-  // Laranja / Coral
   { keys: ['LARANJA NEON'], label: 'LARANJA', color: '#FB923C' },
   { keys: ['LARANJA ZIG ZAG', 'ZIG ZAG'], label: 'LARANJA', color: '#F97316' },
   { keys: ['LARANJA CAMELIA', 'CAMELIA', 'CAMÉLIA'], label: 'LARANJA', color: '#EA580C' },
@@ -169,8 +150,6 @@ const COLOR_KEYWORDS: Array<{ keys: string[]; label: string; color: string }> = 
 
 function findColorHit(rawPart: string): ColorHit | null {
   const s = normalizeColorText(rawPart);
-
-  // ignora termos que não são cor (ex.: TEX)
   if (!s || s === 'TEX') return null;
 
   for (const entry of COLOR_KEYWORDS) {
@@ -180,14 +159,11 @@ function findColorHit(rawPart: string): ColorHit | null {
     }
   }
 
-  // fallback por hash (estável)
   return { label: 'COR', color: textToHslColor(s) };
 }
 
 function getSwatchStyle(raw: string | null | undefined) {
   const cleaned = raw ? cleanColorText(raw) : '';
-
-  // separa composições com "/"
   const parts = cleaned
     ? cleaned
         .split('/')
@@ -195,11 +171,10 @@ function getSwatchStyle(raw: string | null | undefined) {
         .filter(Boolean)
     : [];
 
-  // tenta pegar até 2 cores “de verdade”
   const hits: ColorHit[] = [];
   const used = new Set<string>();
 
-  for (const p of (parts.length ? parts : [cleaned])) {
+  for (const p of parts.length ? parts : [cleaned]) {
     const hit = findColorHit(p);
     if (!hit) continue;
     const key = hit.color;
@@ -210,29 +185,18 @@ function getSwatchStyle(raw: string | null | undefined) {
     if (hits.length >= 2) break;
   }
 
-  // Se ainda não tem nada, usa cinza neutro
   if (hits.length === 0) {
-    return {
-      aria: cleaned || 'Sem cor',
-      style: { backgroundColor: '#94A3B8' } as React.CSSProperties,
-    };
+    return { aria: cleaned || 'Sem cor', style: { backgroundColor: '#94A3B8' } as React.CSSProperties };
   }
 
-  // 2 cores => gradiente (metade/metade)
   if (hits.length >= 2) {
     return {
       aria: cleaned,
-      style: {
-        backgroundImage: `linear-gradient(90deg, ${hits[0].color} 0 50%, ${hits[1].color} 50% 100%)`,
-      } as React.CSSProperties,
+      style: { backgroundImage: `linear-gradient(90deg, ${hits[0].color} 0 50%, ${hits[1].color} 50% 100%)` } as React.CSSProperties,
     };
   }
 
-  // 1 cor
-  return {
-    aria: cleaned,
-    style: { backgroundColor: hits[0].color } as React.CSSProperties,
-  };
+  return { aria: cleaned, style: { backgroundColor: hits[0].color } as React.CSSProperties };
 }
 
 type Anchor = { id: string; top: number };
@@ -248,7 +212,7 @@ export default function Dashboard() {
   const [mostrarScanner, setMostrarScanner] = useState(false);
   const [mostrarFiltros, setMostrarFiltros] = useState(false);
 
-  // ✅ NOVO: controla foco do input para esconder a nav inferior quando teclado abre (iOS)
+  // ✅ controla foco do input para esconder a nav inferior quando teclado abre (iOS)
   const [inputFocado, setInputFocado] = useState(false);
 
   // FILTROS
@@ -275,7 +239,6 @@ export default function Dashboard() {
   }, [signedMap]);
 
   // --- 1) Inicializa filtros a partir da URL (querystring) ---
-  // ✅ sem useSearchParams (evita exigência de Suspense no build)
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -318,7 +281,6 @@ export default function Dashboard() {
 
     const href = qs ? `/?${qs}` : '/';
 
-    // ✅ evita replace repetido do mesmo href
     if (typeof window !== 'undefined') {
       const current = window.location.pathname + window.location.search;
       if (current === href) return;
@@ -376,7 +338,6 @@ export default function Dashboard() {
     setLoading(false);
   }
 
-  // fingerprint estável para evitar qualquer risco de "deps dinâmico"
   const fotosFingerprint = useMemo(() => produtos.map((p) => p.foto_url || '').join('|'), [produtos]);
 
   // --- Assinar imagens (private bucket) ---
@@ -391,8 +352,6 @@ export default function Dashboard() {
       await Promise.all(
         produtos.map(async (p) => {
           if (!p.foto_url) return;
-
-          // lê do ref (evita precisar colocar signedMap no deps e evita loop)
           if (signedMapRef.current[p.foto_url]) return;
 
           const signed = await getSignedUrlCached('produtos', p.foto_url, extractPath, 3600);
@@ -531,7 +490,7 @@ export default function Dashboard() {
     return params.toString();
   }, [busca, tamanhosSelecionados, fornecedorSelecionado, esconderZerados]);
 
-  // --- SCANNER: start/stop + suporte real a CÓDIGO DE BARRAS ---
+  // --- SCANNER ---
   useEffect(() => {
     if (!mostrarScanner) return;
 
@@ -637,7 +596,7 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans pb-44">
-      {/* HEADER (✅ não é mais sticky; rola junto com a página) */}
+      {/* HEADER */}
       <header className="px-6 pt-10 pb-6 bg-slate-950 border-b border-slate-900 flex justify-between items-end backdrop-blur-md">
         <div>
           <p className="text-[10px] font-black tracking-[0.3em] text-pink-500 uppercase mb-1">UpFitness App</p>
@@ -675,12 +634,10 @@ export default function Dashboard() {
       </header>
 
       <main className="px-4 pt-0">
-        {/* BARRA DE BUSCA FIXA (✅ apenas ela fica sticky no topo) */}
+        {/* BARRA DE BUSCA FIXA */}
         <div
           className="sticky z-[60] -mx-4 px-4 pt-4 pb-4 bg-slate-950/90 backdrop-blur-md border-b border-slate-900"
-          style={{
-            top: `env(safe-area-inset-top, 0px)`,
-          }}
+          style={{ top: `env(safe-area-inset-top, 0px)` }}
         >
           <div className="relative">
             <input
@@ -717,8 +674,6 @@ export default function Dashboard() {
               const urlAssinada = produto.foto_url ? signedMap[produto.foto_url] : null;
               const total = produto.estoque?.reduce((acc: number, item: any) => acc + (item.quantidade || 0), 0) || 0;
               const itemHref = currentQS ? `/item/${produto.id}?${currentQS}` : `/item/${produto.id}`;
-
-              // ✅ cor do balão (com suporte a "AZUL/MENTA", "PRETO/BRANCO", "OFF WHITE/ECRU")
               const swatch = getSwatchStyle(produto.cor);
 
               return (
@@ -764,7 +719,6 @@ export default function Dashboard() {
                     <div>
                       <h2 className="font-bold text-slate-100 text-[13px] uppercase line-clamp-2 leading-tight">{produto.descricao}</h2>
 
-                      {/* ✅ Linha fornecedor + cor com balão */}
                       <div className="mt-1 flex items-center gap-2 min-w-0">
                         <span
                           className="w-3.5 h-3.5 rounded-full border border-white/10 shadow flex-shrink-0"
@@ -907,7 +861,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* NAV FLUTUANTE (✅ some quando o input está focado / teclado aberto) */}
+      {/* NAV FLUTUANTE */}
       {!inputFocado && (
         <div className="fixed left-6 right-6 z-[60]" style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + 10px)` }}>
           <nav className="bg-slate-900/95 backdrop-blur-2xl border border-white/5 rounded-[2.5rem] h-20 px-6 flex items-center justify-around shadow-2xl">
@@ -931,9 +885,21 @@ export default function Dashboard() {
               className="flex flex-col items-center gap-1 opacity-40"
             >
               <div className="p-2">
-                <span className="text-xl">📊</span>
+                <span className="text-xl">🧾</span>
               </div>
               <span className="text-[9px] font-black text-white tracking-widest uppercase">Histórico</span>
+            </Link>
+
+            {/* ✅ NOVO: RELATÓRIOS */}
+            <Link
+              href={currentQS ? `/relatorios?${currentQS}` : '/relatorios'}
+              onClick={() => saveReturnState()}
+              className="flex flex-col items-center gap-1 opacity-40"
+            >
+              <div className="p-2">
+                <span className="text-xl">📈</span>
+              </div>
+              <span className="text-[9px] font-black text-white tracking-widest uppercase">Relatórios</span>
             </Link>
           </nav>
         </div>
@@ -955,7 +921,6 @@ export default function Dashboard() {
 
           {scannerTips}
 
-          {/* fallback manual */}
           <div className="mt-4">
             <label className="text-[10px] font-black tracking-widest uppercase text-slate-500 block mb-2">Digitar / Colar código</label>
             <input
