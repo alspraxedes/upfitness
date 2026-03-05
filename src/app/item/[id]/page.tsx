@@ -1,11 +1,10 @@
 // src/app/item/[id]/page.tsx
 'use client';
 
-import { use, useEffect, useState, useRef } from 'react';
+import { use, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { supabase } from '../../../lib/supabase';
-import { Html5Qrcode } from 'html5-qrcode';
 import { getSignedUrlCached } from '../../../lib/signedUrlCache';
 
 // --- UTILITÁRIOS ---
@@ -19,17 +18,37 @@ function blobToFile(blob: Blob, filename: string) {
   return new File([blob], filename, { type: blob.type || 'image/jpeg' });
 }
 
+// ✅ Mesma extração robusta do dashboard
 function extractPath(url: string | null) {
   if (!url) return null;
+  if (!url.startsWith('http')) return url;
+
   try {
-    if (url.startsWith('http')) {
-      const urlObj = new URL(url);
-      const pathParts = urlObj.pathname.split('/produtos/');
-      if (pathParts.length > 1) return decodeURIComponent(pathParts[1]);
+    const urlObj = new URL(url);
+    const pathName = urlObj.pathname;
+
+    const bucketName = 'produtos';
+    const markerPublic = `/public/${bucketName}/`;
+    const markerSign = `/${bucketName}/`;
+
+    let extractedPath = '';
+
+    if (pathName.includes(markerPublic)) {
+      extractedPath = pathName.substring(pathName.indexOf(markerPublic) + markerPublic.length);
+    } else if (pathName.includes(markerSign)) {
+      extractedPath = pathName.substring(pathName.indexOf(markerSign) + markerSign.length);
+    } else {
+      const parts = pathName.split('/');
+      const bucketIndex = parts.findIndex((p) => p === bucketName);
+      if (bucketIndex !== -1 && parts.length > bucketIndex + 1) {
+        extractedPath = parts.slice(bucketIndex + 1).join('/');
+      }
     }
-    return url;
-  } catch (e) {
-    return url;
+
+    return extractedPath ? decodeURIComponent(extractedPath) : null;
+  } catch (error) {
+    console.error('Erro ao extrair caminho da imagem:', url, error);
+    return null;
   }
 }
 
@@ -49,10 +68,13 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
   const qs = searchParams.toString();
   const dashHref = qs ? `/?${qs}` : '/';
 
-  // Refs
+  // Refs (foto)
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const scannerRef = useRef<Html5Qrcode | null>(null);
+
+  // Scanner (EAN)
+  const scannerRef = useRef<any>(null);
+  const zxingRef = useRef<{ reset: () => void } | null>(null);
 
   // --- ESTADOS ---
   const [loading, setLoading] = useState(true);
@@ -77,6 +99,9 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     margem_ganho: 0,
     descontinuado: false,
   });
+
+  // ✅ snapshot para "Cancelar edição"
+  const [formSnapshot, setFormSnapshot] = useState<typeof formData | null>(null);
 
   // MODAIS
   const [modalFoto, setModalFoto] = useState(false);
@@ -140,7 +165,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     const custo = (data.preco_compra || 0) + (data.custo_frete || 0) + (data.custo_embalagem || 0);
     const margem = custo > 0 ? ((data.preco_venda - custo) / custo) * 100 : 100;
 
-    setFormData({
+    const nextForm = {
       descricao: data.descricao,
       fornecedor: data.fornecedor,
       sku_fornecedor: data.sku_fornecedor || '',
@@ -151,7 +176,12 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
       preco_venda: data.preco_venda,
       margem_ganho: parseFloat(margem.toFixed(1)),
       descontinuado: data.descontinuado,
-    });
+    };
+
+    setFormData(nextForm);
+
+    // se não estiver editando, mantém snapshot em sincronia com o dado real
+    setFormSnapshot((prev) => (editando ? prev : nextForm));
 
     setLoading(false);
   }
@@ -164,7 +194,6 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     try {
       const maybePath = extractPath(produto.foto_url);
 
-      // Preferência: baixar direto do Storage (original), sem recompressão.
       if (maybePath && (maybePath.includes('/') || maybePath.includes('.'))) {
         const { data, error } = await supabase.storage.from('produtos').download(maybePath);
         if (error || !data) throw new Error('Falha ao baixar do storage');
@@ -180,7 +209,6 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
         return;
       }
 
-      // Fallback: baixar a partir da signedUrl (quando não conseguimos extrair path)
       if (signedUrl) {
         const res = await fetch(signedUrl);
         if (!res.ok) throw new Error('Falha ao baixar a partir da URL');
@@ -261,7 +289,19 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     if (error) return alert('Erro ao salvar');
 
     setEditando(false);
+    setFormSnapshot(null);
     carregarDados();
+  };
+
+  const iniciarEdicao = () => {
+    setFormSnapshot(formData); // snapshot do estado atual
+    setEditando(true);
+  };
+
+  const cancelarEdicao = () => {
+    if (formSnapshot) setFormData(formSnapshot);
+    setEditando(false);
+    setFormSnapshot(null);
   };
 
   // --- LÓGICA FINANCEIRA ---
@@ -289,37 +329,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     });
   };
 
-  // --- ESTOQUE & SCANNER ---
-  useEffect(() => {
-    if (modalEstoque.aberto && modalEstoque.scanning) {
-      const elementId = 'reader-ean-edit';
-      const timeout = setTimeout(() => {
-        if (!document.getElementById(elementId)) return;
-
-        const scanner = new Html5Qrcode(elementId);
-        scannerRef.current = scanner;
-
-        scanner
-          .start(
-            { facingMode: 'environment' },
-            { fps: 30, qrbox: { width: 250, height: 100 }, aspectRatio: 1.0 },
-            (text) => {
-              setModalEstoque((p) => ({ ...p, eanAtual: text, scanning: false }));
-              scanner.stop().then(() => {
-                try {
-                  scanner.clear();
-                } catch {}
-              });
-            },
-            () => {}
-          )
-          .catch(console.error);
-      }, 200);
-
-      return () => clearTimeout(timeout);
-    }
-  }, [modalEstoque.aberto, modalEstoque.scanning]);
-
+  // --- ESTOQUE ---
   const confirmarEstoque = async () => {
     if (modalEstoque.tipo === 'edicao') {
       const { error } = await supabase.from('estoque').update({ codigo_barras: modalEstoque.eanAtual }).eq('id', modalEstoque.itemEstoqueId);
@@ -332,7 +342,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
       await supabase.from('estoque').update({ quantidade: nova }).eq('id', modalEstoque.itemEstoqueId);
     }
 
-    setModalEstoque((p) => ({ ...p, aberto: false }));
+    setModalEstoque((p) => ({ ...p, aberto: false, scanning: false }));
     carregarDados();
   };
 
@@ -343,23 +353,195 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     carregarDados();
   };
 
-  // --- Cleanup camera/scanner on unmount (compatível com clear(): void) ---
+  // ✅ Leitor EAN (mesma lógica/config do dashboard)
+  useEffect(() => {
+    if (!modalEstoque.aberto || !modalEstoque.scanning) return;
+
+    const elementId = 'reader-ean-edit-direct';
+    let cancelled = false;
+
+    const stopAndClear = async (s: any) => {
+      if (!s) return;
+      try {
+        const maybe = s.stop?.();
+        if (maybe && typeof maybe.then === 'function') {
+          await maybe.catch(() => {});
+        }
+      } catch {}
+      try {
+        s.clear?.();
+      } catch {}
+    };
+
+    const start = async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      if (cancelled) return;
+
+      const el = document.getElementById(elementId);
+      if (!el) return;
+
+      el.innerHTML = '';
+      el.classList.remove('hidden');
+
+      const zxingVideo = document.getElementById('zxing-video-ean-edit') as HTMLVideoElement | null;
+      if (zxingVideo) zxingVideo.classList.add('hidden');
+
+      await stopAndClear(scannerRef.current);
+      if (zxingRef.current) {
+        try {
+          zxingRef.current.reset();
+        } catch {}
+        zxingRef.current = null;
+      }
+
+      const hasBarcodeDetector = typeof (window as any).BarcodeDetector !== 'undefined';
+
+      if (!hasBarcodeDetector) {
+        try {
+          const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
+            import('@zxing/browser'),
+            import('@zxing/library'),
+          ]);
+
+          if (cancelled) return;
+          if (!zxingVideo) {
+            console.error('ZXing video element não encontrado.');
+            return;
+          }
+
+          el.classList.add('hidden');
+          zxingVideo.classList.remove('hidden');
+
+          const hints = new Map();
+          hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]);
+
+          const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 200 });
+
+          zxingRef.current = {
+            reset: () => {
+              try {
+                (reader as any).stopContinuousDecode?.();
+              } catch {}
+              try {
+                (reader as any).stopAsyncDecode?.();
+              } catch {}
+              try {
+                const stream = (zxingVideo as any)?.srcObject as MediaStream | null;
+                stream?.getTracks?.().forEach((t) => t.stop());
+                (zxingVideo as any).srcObject = null;
+              } catch {}
+            },
+          };
+
+          const devices = await BrowserMultiFormatReader.listVideoInputDevices();
+          const preferred = devices.find((d: any) => /back|rear|traseira|environment/i.test(d.label)) ?? devices[0];
+
+          reader.decodeFromVideoDevice(preferred?.deviceId, zxingVideo, (result) => {
+            if (cancelled) return;
+            const text = result?.getText?.() ? result.getText() : '';
+            if (text) {
+              const cleaned = String(text).trim();
+              setModalEstoque((p) => ({ ...p, eanAtual: cleaned, scanning: false }));
+              try {
+                zxingRef.current?.reset();
+              } catch {}
+            }
+          });
+
+          return;
+        } catch (err) {
+          console.error('Falha ao iniciar ZXing fallback:', err);
+        }
+      }
+
+      let Html5Qrcode: any;
+      let Formats: any;
+
+      try {
+        const mod = await import('html5-qrcode');
+        if (cancelled) return;
+        Html5Qrcode = mod.Html5Qrcode;
+        Formats = mod.Html5QrcodeSupportedFormats;
+      } catch (err) {
+        console.error('Falha ao carregar html5-qrcode:', err);
+        return;
+      }
+
+      const scanner = new Html5Qrcode(elementId);
+      scannerRef.current = scanner;
+
+      const config: any = {
+        fps: 9,
+        qrbox: { width: 280, height: 120 },
+        aspectRatio: 1.777,
+        disableFlip: true,
+        formatsToSupport: [Formats.EAN_13, Formats.EAN_8],
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+        videoConstraints: { width: { ideal: 1280 }, height: { ideal: 720 } },
+      };
+
+      const onDecode = async (decodedText: string) => {
+        if (cancelled) return;
+        const cleaned = String(decodedText || '').trim();
+        if (!cleaned) return;
+        setModalEstoque((p) => ({ ...p, eanAtual: cleaned, scanning: false }));
+        await stopAndClear(scanner);
+      };
+
+      try {
+        const cameras = await Html5Qrcode.getCameras();
+        const preferred = cameras.find((c: any) => /back|rear|traseira|environment/i.test(c.label)) ?? cameras[0];
+
+        await scanner.start({ deviceId: { exact: preferred.id } }, config, onDecode, () => {});
+      } catch (err) {
+        console.error('Falha ao iniciar html5-qrcode:', err);
+        try {
+          await scanner.start({ facingMode: 'environment' }, config, onDecode, () => {});
+        } catch (err2) {
+          console.error('Fallback html5-qrcode falhou:', err2);
+        }
+      }
+    };
+
+    start();
+
+    return () => {
+      cancelled = true;
+      stopAndClear(scannerRef.current);
+
+      if (zxingRef.current) {
+        try {
+          zxingRef.current.reset();
+        } catch {}
+        zxingRef.current = null;
+      }
+    };
+  }, [modalEstoque.aberto, modalEstoque.scanning]);
+
+  // --- Cleanup camera/scanner on unmount ---
   useEffect(() => {
     return () => {
       try {
         const s = scannerRef.current;
         if (s) {
           try {
-            const maybePromise = s.stop();
+            const maybePromise = s.stop?.();
             if (maybePromise && typeof (maybePromise as any).then === 'function') {
               (maybePromise as Promise<void>).catch(() => {});
             }
           } catch {}
           try {
-            s.clear();
+            s.clear?.();
           } catch {}
         }
       } catch {}
+
+      if (zxingRef.current) {
+        try {
+          zxingRef.current.reset();
+        } catch {}
+        zxingRef.current = null;
+      }
 
       try {
         streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -368,37 +550,67 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
   }, []);
 
   if (loading)
-    return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-pink-500 font-black animate-pulse">CARREGANDO...</div>;
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-800 font-black animate-pulse uppercase text-xs tracking-widest">
+        Sincronizando...
+      </div>
+    );
 
   return (
     <div className={`min-h-screen bg-slate-950 text-slate-100 font-sans pb-32 ${formData.descontinuado ? 'grayscale-[0.8]' : ''}`}>
-      {/* HEADER */}
-      <header className="bg-gradient-to-r from-pink-600 to-blue-600 p-6 shadow-2xl mb-8 flex justify-between items-center sticky top-0 z-40">
-        <div className="flex items-center gap-4">
-          <Link href={dashHref} className="bg-black/20 hover:bg-black/40 px-3 py-2 rounded-full text-white transition-colors text-xs font-bold">
-            ← VOLTAR
-          </Link>
-        </div>
-        <div className="flex gap-2">
-          {!editando ? (
-            <button
-              onClick={() => setEditando(true)}
-              className="bg-white text-pink-600 px-5 py-2 rounded-full text-[10px] font-black uppercase tracking-widest shadow-lg active:scale-95 transition-transform"
+      {/* HEADER (voltar à esquerda, como nas outras páginas) */}
+      <header className="px-6 pt-10 pb-6 bg-slate-950 border-b border-slate-900 backdrop-blur-md sticky top-0 z-[60]">
+        <div className="flex items-end justify-between gap-4">
+          <div className="flex items-end gap-3">
+            <Link
+              href={dashHref}
+              className="w-12 h-12 bg-slate-900 border border-slate-800 text-white rounded-2xl flex items-center justify-center text-xl shadow-lg active:scale-90 transition-transform"
+              aria-label="Voltar"
+              title="Voltar"
             >
-              Editar
-            </button>
-          ) : (
-            <button
-              onClick={salvarEdicao}
-              className="bg-green-500 text-white px-6 py-2 rounded-full text-[10px] font-black uppercase tracking-widest shadow-lg active:scale-95 transition-transform"
-            >
-              Salvar
-            </button>
-          )}
+              ←
+            </Link>
+
+            <div>
+              <p className="text-[10px] font-black tracking-[0.3em] text-pink-500 uppercase mb-1">UpFitness App</p>
+              <h1 className="text-2xl font-black italic tracking-tighter uppercase">
+                ITEM <span className="font-light not-italic text-slate-500 text-lg">DETALHE</span>
+              </h1>
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            {!editando ? (
+              <button
+                onClick={iniciarEdicao}
+                className="h-12 px-5 bg-gradient-to-tr from-pink-600 to-blue-600 text-white rounded-2xl flex items-center justify-center text-[10px] font-black uppercase tracking-widest shadow-lg shadow-pink-500/20 active:scale-90 transition-transform"
+                aria-label="Editar"
+              >
+                Editar
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={cancelarEdicao}
+                  className="h-12 px-5 bg-slate-900 border border-slate-800 text-slate-200 rounded-2xl flex items-center justify-center text-[10px] font-black uppercase tracking-widest shadow-lg active:scale-90 transition-transform"
+                  aria-label="Cancelar edição"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={salvarEdicao}
+                  className="h-12 px-6 bg-emerald-600 text-white rounded-2xl flex items-center justify-center text-[10px] font-black uppercase tracking-widest shadow-lg active:scale-90 transition-transform"
+                  aria-label="Salvar"
+                >
+                  Salvar
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 space-y-6">
+      <main className="max-w-4xl mx-auto px-4 pt-6 space-y-6">
         {/* STATUS CODE */}
         <div className="flex justify-between items-center bg-slate-900 p-4 rounded-2xl border border-slate-800">
           <div>
@@ -409,7 +621,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
             <button
               onClick={() => setFormData({ ...formData, descontinuado: !formData.descontinuado })}
               className={`px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest ${
-                formData.descontinuado ? 'bg-red-900/30 text-red-500' : 'bg-green-900/30 text-green-500'
+                formData.descontinuado ? 'bg-red-900/30 text-red-500' : 'bg-emerald-900/30 text-emerald-400'
               }`}
             >
               {formData.descontinuado ? '🚫 Descontinuado' : '✅ Ativo'}
@@ -429,7 +641,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
               >
                 {signedUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={signedUrl} className="w-full h-full object-cover" alt="" />
+                  <img src={signedUrl} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" alt="" />
                 ) : (
                   <span className="text-4xl opacity-30">📷</span>
                 )}
@@ -441,7 +653,6 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                 )}
               </button>
 
-              {/* ÍCONE DE DOWNLOAD (sempre que houver foto) */}
               {!!produto?.foto_url && (
                 <button
                   type="button"
@@ -524,15 +735,15 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                   </div>
 
                   <div className="space-y-1">
-                    <label className="text-[9px] font-black text-green-500 uppercase ml-1 truncate">Margem %</label>
+                    <label className="text-[9px] font-black text-emerald-400 uppercase ml-1 truncate">Margem %</label>
                     <div className="relative">
                       <input
                         type="number"
                         value={formData.margem_ganho}
                         onChange={(e) => handleMarginInput(e.target.value)}
-                        className="w-full bg-slate-900 p-2 pr-5 rounded-lg border border-slate-700 text-green-400 font-bold text-base focus:border-green-500 outline-none"
+                        className="w-full bg-slate-900 p-2 pr-5 rounded-lg border border-slate-700 text-emerald-300 font-bold text-base focus:border-emerald-500 outline-none"
                       />
-                      <span className="absolute right-1 top-2.5 text-xs text-green-600 font-bold">%</span>
+                      <span className="absolute right-1 top-2.5 text-xs text-emerald-500 font-bold">%</span>
                     </div>
                   </div>
                 </div>
@@ -654,11 +865,17 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
 
       {/* MODAL ADICIONAR TAMANHO */}
       {modalAddTamanho && (
-        <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-slate-900 p-6 rounded-3xl w-full max-w-xs border border-slate-800 shadow-2xl">
-            <h3 className="text-center font-black text-white mb-4 uppercase text-sm tracking-widest">Novo Tamanho</h3>
+        <div className="fixed inset-0 z-[110] bg-slate-950/95 backdrop-blur-xl flex items-end justify-center p-4">
+          <div className="bg-slate-900 w-full max-w-xs rounded-[3rem] border border-slate-800 p-6 shadow-2xl animate-in slide-in-from-bottom-10">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-sm font-black italic text-pink-500 uppercase tracking-tighter">Novo Tamanho</h3>
+              <button onClick={() => setModalAddTamanho(false)} className="text-slate-500 font-black text-[10px] uppercase">
+                Fechar
+              </button>
+            </div>
+
             <select
-              className="w-full bg-slate-950 p-4 rounded-xl border border-slate-700 text-white mb-4 outline-none text-base"
+              className="w-full bg-slate-950 border border-slate-800 rounded-2xl py-4 px-4 text-white font-bold outline-none text-base mb-4"
               onChange={(e) => setNovoTamanhoId(e.target.value)}
               value={novoTamanhoId}
             >
@@ -671,42 +888,57 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                   </option>
                 ))}
             </select>
-            <button onClick={addTamanho} className="w-full bg-pink-600 text-white py-4 rounded-xl font-black uppercase text-xs mb-2 shadow-lg active:scale-95">
-              Adicionar
-            </button>
-            <button onClick={() => setModalAddTamanho(false)} className="w-full bg-slate-800 text-slate-400 py-4 rounded-xl font-black uppercase text-xs active:scale-95">
-              Cancelar
-            </button>
+
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={addTamanho}
+                className="w-full bg-gradient-to-r from-pink-600 to-blue-600 text-white py-5 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl shadow-pink-500/20 active:scale-95"
+              >
+                Adicionar
+              </button>
+              <button
+                onClick={() => setModalAddTamanho(false)}
+                className="w-full py-4 rounded-[2rem] border border-slate-800 text-slate-500 font-black text-[10px] uppercase tracking-widest hover:bg-slate-800/30 transition-colors active:scale-95"
+              >
+                Cancelar
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {/* MODAL FOTO */}
       {modalFoto && (
-        <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center p-4 backdrop-blur-md">
+        <div className="fixed inset-0 z-[120] bg-slate-950/95 backdrop-blur-xl flex items-end justify-center p-4">
           {fotoTemp ? (
-            <div className="w-full max-w-sm flex flex-col gap-4">
+            <div className="bg-slate-900 w-full max-w-sm rounded-[3rem] border border-slate-800 p-6 shadow-2xl animate-in slide-in-from-bottom-10">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={fotoTemp.url} className="rounded-2xl border-2 border-pink-500 shadow-2xl" alt="" />
-              <button
-                onClick={() => uploadFoto(blobToFile(fotoTemp.blob, 'cam.jpg'))}
-                className="bg-green-600 text-white py-4 rounded-xl font-black uppercase text-xs shadow-lg active:scale-95"
-              >
-                Confirmar
-              </button>
-              <button onClick={() => setFotoTemp(null)} className="bg-slate-800 text-white py-4 rounded-xl font-black uppercase text-xs active:scale-95">
-                Tentar de Novo
-              </button>
+              <div className="flex flex-col gap-3 mt-4">
+                <button
+                  onClick={() => uploadFoto(blobToFile(fotoTemp.blob, 'cam.jpg'))}
+                  className="w-full bg-emerald-600 text-white py-5 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl active:scale-95"
+                >
+                  Confirmar
+                </button>
+                <button
+                  onClick={() => setFotoTemp(null)}
+                  className="w-full py-4 rounded-[2rem] border border-slate-800 text-slate-400 font-black text-[10px] uppercase tracking-widest hover:bg-slate-800/30 transition-colors active:scale-95"
+                >
+                  Tentar de Novo
+                </button>
+              </div>
             </div>
           ) : (
-            <div className="w-full max-w-sm flex flex-col gap-4">
-              <div className="aspect-[3/4] bg-black rounded-3xl overflow-hidden relative border-2 border-slate-700 shadow-2xl">
+            <div className="bg-slate-900 w-full max-w-sm rounded-[3rem] border border-slate-800 p-6 shadow-2xl animate-in slide-in-from-bottom-10">
+              <div className="aspect-[3/4] bg-black rounded-3xl overflow-hidden relative border-2 border-slate-800 shadow-2xl">
                 <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
               </div>
-              <div className="flex gap-3">
+
+              <div className="flex gap-3 mt-4">
                 <button
                   onClick={abrirCameraFoto}
-                  className="flex-1 bg-pink-600 text-white py-4 rounded-xl font-black uppercase text-xs shadow-lg active:scale-95"
+                  className="flex-1 bg-gradient-to-r from-pink-600 to-blue-600 text-white py-4 rounded-2xl font-black uppercase text-xs shadow-lg active:scale-95"
                   onMouseDown={() => {
                     const canvas = document.createElement('canvas');
                     if (videoRef.current) {
@@ -719,10 +951,11 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                 >
                   Capturar
                 </button>
-                <label className="flex-1 bg-blue-600 text-white py-4 rounded-xl font-black uppercase text-xs flex items-center justify-center cursor-pointer shadow-lg active:scale-95">
+                <label className="flex-1 bg-slate-800 text-white py-4 rounded-2xl font-black uppercase text-xs flex items-center justify-center cursor-pointer shadow-lg active:scale-95">
                   Galeria <input type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
                 </label>
               </div>
+
               <button
                 onClick={() => {
                   setModalFoto(false);
@@ -730,7 +963,7 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
                     streamRef.current?.getTracks().forEach((t) => t.stop());
                   } catch {}
                 }}
-                className="w-full bg-slate-800 text-white py-4 rounded-xl font-black uppercase text-xs active:scale-95"
+                className="w-full py-4 mt-3 rounded-[2rem] border border-slate-800 text-slate-400 font-black text-[10px] uppercase tracking-widest hover:bg-slate-800/30 transition-colors active:scale-95"
               >
                 Cancelar
               </button>
@@ -739,46 +972,65 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
         </div>
       )}
 
-      {/* MODAL ESTOQUE & EAN */}
+      {/* MODAL ESTOQUE & EAN (com leitor igual ao dashboard) */}
       {modalEstoque.aberto && (
-        <div className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-slate-900 p-6 rounded-3xl w-full max-w-xs border border-slate-800 shadow-2xl space-y-4">
-            <h3 className="text-center font-black uppercase text-white tracking-widest text-sm">
-              {modalEstoque.tipo === 'edicao' ? 'Editar EAN' : modalEstoque.tipo === 'entrada' ? 'Carga Estoque' : 'Baixa Estoque'}
-            </h3>
-            <p className="text-center text-xs font-bold text-slate-500">{modalEstoque.tamanhoNome}</p>
+        <div className="fixed inset-0 z-[130] bg-slate-950/95 backdrop-blur-xl flex items-end justify-center p-4">
+          <div className="bg-slate-900 w-full max-w-xs rounded-[3rem] border border-slate-800 p-6 shadow-2xl animate-in slide-in-from-bottom-10 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-black italic text-pink-500 uppercase tracking-tighter">
+                {modalEstoque.tipo === 'edicao' ? 'EAN' : modalEstoque.tipo === 'entrada' ? 'Entrada' : 'Saída'}
+              </h3>
+              <button onClick={() => setModalEstoque((p) => ({ ...p, aberto: false, scanning: false }))} className="text-slate-500 font-black text-[10px] uppercase">
+                Fechar
+              </button>
+            </div>
+
+            <p className="text-xs font-bold text-slate-500">{modalEstoque.tamanhoNome}</p>
 
             {modalEstoque.tipo === 'edicao' ? (
               <>
                 <input
                   value={modalEstoque.eanAtual}
-                  onChange={(e) => setModalEstoque({ ...modalEstoque, eanAtual: e.target.value })}
-                  className="w-full bg-slate-950 p-4 rounded-xl text-white font-mono text-center border border-slate-700 outline-none focus:border-blue-500 text-base"
+                  onChange={(e) => setModalEstoque((p) => ({ ...p, eanAtual: e.target.value }))}
+                  className="w-full bg-slate-950 p-4 rounded-2xl text-white font-mono text-center border border-slate-800 outline-none focus:border-blue-500 text-base"
                   placeholder="Sem EAN"
                 />
+
                 <button
-                  onClick={() => setModalEstoque({ ...modalEstoque, scanning: true })}
-                  className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold uppercase text-xs shadow-lg active:scale-95"
+                  onClick={() => setModalEstoque((p) => ({ ...p, scanning: true }))}
+                  className="w-full bg-gradient-to-r from-pink-600 to-blue-600 text-white py-4 rounded-2xl font-black uppercase text-xs tracking-widest shadow-xl shadow-pink-500/20 active:scale-95"
                 >
                   📷 Ler Cód. Barras
                 </button>
-                {modalEstoque.scanning && <div id="reader-ean-edit" className="h-48 bg-black rounded-xl overflow-hidden border-2 border-blue-500 mt-2"></div>}
+
+                {modalEstoque.scanning && (
+                  <div className="rounded-[2rem] overflow-hidden bg-black border-2 border-pink-500/30 shadow-2xl shadow-pink-500/10 relative mt-2">
+                    <video id="zxing-video-ean-edit" className="h-56 w-full object-cover hidden" muted playsInline />
+                    <div id="reader-ean-edit-direct" className="h-56 w-full" />
+                  </div>
+                )}
               </>
             ) : (
               <input
                 type="number"
                 autoFocus
-                className="w-full bg-slate-950 p-4 rounded-xl text-white text-3xl font-black text-center border border-slate-700 outline-none focus:border-pink-500"
+                className="w-full bg-slate-950 p-4 rounded-2xl text-white text-3xl font-black text-center border border-slate-800 outline-none focus:border-pink-500"
                 placeholder="Qtd"
-                onChange={(e) => setModalEstoque({ ...modalEstoque, qtdOperacao: e.target.value })}
+                onChange={(e) => setModalEstoque((p) => ({ ...p, qtdOperacao: e.target.value }))}
               />
             )}
 
             <div className="flex gap-3 pt-2">
-              <button onClick={() => setModalEstoque({ ...modalEstoque, aberto: false })} className="flex-1 bg-slate-800 text-white py-4 rounded-xl font-black uppercase text-xs active:scale-95">
+              <button
+                onClick={() => setModalEstoque((p) => ({ ...p, aberto: false, scanning: false }))}
+                className="flex-1 py-4 rounded-[2rem] border border-slate-800 text-slate-400 font-black text-[10px] uppercase tracking-widest hover:bg-slate-800/30 transition-colors active:scale-95"
+              >
                 Cancelar
               </button>
-              <button onClick={confirmarEstoque} className="flex-1 bg-green-600 text-white py-4 rounded-xl font-black uppercase text-xs shadow-lg active:scale-95">
+              <button
+                onClick={confirmarEstoque}
+                className="flex-1 bg-emerald-600 text-white py-4 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl active:scale-95"
+              >
                 Confirmar
               </button>
             </div>
