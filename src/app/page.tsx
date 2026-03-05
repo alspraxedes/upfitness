@@ -225,6 +225,7 @@ export default function Dashboard() {
 
   // Scanner: evita importar html5-qrcode no topo
   const scannerRef = useRef<any>(null);
+  const zxingRef = useRef<{ reset: () => void } | null>(null);
 
   // Keys (sessionStorage)
   const scrollKey = 'dashboard:scrollY';
@@ -381,24 +382,40 @@ export default function Dashboard() {
 
   // Busca + filtros
   const filtrados = useMemo(() => {
-    const q = busca.toLowerCase().trim();
+    const qRaw = busca.toLowerCase().trim();
+    const qDigits = qRaw.replace(/\D/g, ''); // só números (EAN costuma ser só dígitos)
+  
     return produtos.filter((p) => {
       const total = p.estoque?.reduce((acc: number, item: any) => acc + (item.quantidade || 0), 0) || 0;
-
+  
       const matchTexto =
-        !q ||
-        p.descricao?.toLowerCase().includes(q) ||
-        p.codigo_peca?.toLowerCase().includes(q) ||
-        p.cor?.toLowerCase().includes(q) ||
-        p.sku_fornecedor?.toLowerCase().includes(q) ||
-        p.fornecedor?.toLowerCase().includes(q);
-
+        !qRaw ||
+        p.descricao?.toLowerCase().includes(qRaw) ||
+        p.codigo_peca?.toLowerCase().includes(qRaw) ||
+        p.cor?.toLowerCase().includes(qRaw) ||
+        p.sku_fornecedor?.toLowerCase().includes(qRaw) ||
+        p.fornecedor?.toLowerCase().includes(qRaw);
+  
+      // ✅ NOVO: match por EAN/código de barras
+      const matchEAN =
+        !qDigits ||
+        p.estoque?.some((e: any) => {
+          const bc = String(e.codigo_barras || '');
+          const bcDigits = bc.replace(/\D/g, '');
+          return bcDigits === qDigits || bcDigits.includes(qDigits);
+        });
+  
       const matchTamanho =
         tamanhosSelecionados.length === 0 || p.estoque?.some((e: any) => tamanhosSelecionados.includes(e.tamanho?.nome));
+  
       const matchFornecedor = !fornecedorSelecionado || p.fornecedor === fornecedorSelecionado;
       const matchEstoque = esconderZerados ? total > 0 : true;
-
-      return matchTexto && matchTamanho && matchFornecedor && matchEstoque;
+  
+      // Se o usuário digitou texto, usa matchTexto.
+      // Se digitou números (EAN), também permite matchEAN.
+      const matchBusca = !qRaw ? true : (matchTexto || matchEAN);
+  
+      return matchBusca && matchTamanho && matchFornecedor && matchEstoque;
     });
   }, [busca, produtos, tamanhosSelecionados, esconderZerados, fornecedorSelecionado]);
 
@@ -493,10 +510,10 @@ export default function Dashboard() {
   // --- SCANNER ---
   useEffect(() => {
     if (!mostrarScanner) return;
-
+  
     const elementId = 'reader-dashboard-direct';
     let cancelled = false;
-
+  
     const stopAndClear = async (s: any) => {
       if (!s) return;
       try {
@@ -509,20 +526,99 @@ export default function Dashboard() {
         s.clear?.();
       } catch {}
     };
-
+  
     const start = async () => {
       await new Promise((r) => setTimeout(r, 150));
       if (cancelled) return;
-
+    
       const el = document.getElementById(elementId);
       if (!el) return;
-
+    
+      // garante que o container do html5-qrcode esteja limpo/visível
       el.innerHTML = '';
-
+      el.classList.remove('hidden');
+    
+      // prepara o video do zxing
+      const zxingVideo = document.getElementById('zxing-video') as HTMLVideoElement | null;
+      if (zxingVideo) zxingVideo.classList.add('hidden');
+    
       await stopAndClear(scannerRef.current);
-
+      if (zxingRef.current) {
+        try { zxingRef.current.reset(); } catch {}
+        zxingRef.current = null;
+      }
+    
+      // Detecta suporte a BarcodeDetector (fundamental para 1D no desktop)
+      const hasBarcodeDetector = typeof (window as any).BarcodeDetector !== 'undefined';
+    
+      // Se NÃO tiver BarcodeDetector: usar ZXing (desktop fallback)
+      if (!hasBarcodeDetector) {
+        try {
+          const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
+            import('@zxing/browser'),
+            import('@zxing/library'),
+          ]);
+    
+          if (cancelled) return;
+    
+          if (!zxingVideo) {
+            console.error('ZXing video element não encontrado.');
+            return;
+          }
+    
+          // esconde html5-qrcode e mostra o video
+          el.classList.add('hidden');
+          zxingVideo.classList.remove('hidden');
+    
+          const hints = new Map();
+          hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]);
+    
+          const reader = new BrowserMultiFormatReader(hints, {
+            delayBetweenScanAttempts: 200,
+          });
+          zxingRef.current = {
+            reset: () => {
+              // tenta parar a leitura se existir
+              try { (reader as any).stopContinuousDecode?.(); } catch {}
+              try { (reader as any).stopAsyncDecode?.(); } catch {}
+          
+              // para tracks do vídeo para liberar câmera
+              try {
+                const stream = (zxingVideo as any)?.srcObject as MediaStream | null;
+                stream?.getTracks?.().forEach((t) => t.stop());
+                (zxingVideo as any).srcObject = null;
+              } catch {}
+            },
+          };
+    
+          const devices = await BrowserMultiFormatReader.listVideoInputDevices();
+          const preferred =
+            devices.find((d: any) => /back|rear|traseira|environment/i.test(d.label)) ?? devices[0];
+    
+          // inicia leitura
+          reader.decodeFromVideoDevice(preferred?.deviceId, zxingVideo, (result, err) => {
+            if (cancelled) return;
+            const text = result?.getText?.() ? result.getText() : '';
+            if (text) {
+              const cleaned = String(text).trim();
+              setBusca(cleaned);
+              setMostrarScanner(false);
+              try { zxingRef.current?.reset(); } catch {}
+            }
+          });
+    
+          return; // ✅ não inicia html5-qrcode nesse caminho
+        } catch (err) {
+          console.error('Falha ao iniciar ZXing fallback:', err);
+          // se ZXing falhar, cai no html5-qrcode como última tentativa
+          // (vai provavelmente não ler EAN no desktop sem BarcodeDetector, mas ao menos abre câmera)
+        }
+      }
+    
+      // --- Caminho padrão (iPhone / browsers com BarcodeDetector): html5-qrcode ---
       let Html5Qrcode: any;
       let Formats: any;
+    
       try {
         const mod = await import('html5-qrcode');
         if (cancelled) return;
@@ -532,53 +628,58 @@ export default function Dashboard() {
         console.error('Falha ao carregar html5-qrcode:', err);
         return;
       }
-
+    
       const scanner = new Html5Qrcode(elementId);
       scannerRef.current = scanner;
-
+    
       const config: any = {
-        fps: 12,
-        qrbox: { width: 320, height: 140 },
+        fps: 9,
+        qrbox: { width: 280, height: 120 },
         aspectRatio: 1.777,
         disableFlip: true,
-        formatsToSupport: [
-          Formats.EAN_13,
-          Formats.EAN_8,
-          Formats.UPC_A,
-          Formats.UPC_E,
-          Formats.CODE_128,
-          Formats.CODE_39,
-          Formats.ITF,
-        ],
+        formatsToSupport: [Formats.EAN_13, Formats.EAN_8],
         experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+    
+        // opcional: resolução ajuda foco sem afetar iPhone negativamente
+        videoConstraints: { width: { ideal: 1280 }, height: { ideal: 720 } },
       };
-
+    
+      const onDecode = async (decodedText: string) => {
+        if (cancelled) return;
+        const cleaned = String(decodedText || '').trim();
+        if (!cleaned) return;
+        setBusca(cleaned);
+        setMostrarScanner(false);
+        await stopAndClear(scanner);
+      };
+    
       try {
-        await scanner.start(
-          { facingMode: 'environment' },
-          config,
-          async (decodedText: string) => {
-            if (cancelled) return;
-
-            const cleaned = String(decodedText || '').trim();
-            if (!cleaned) return;
-
-            setBusca(cleaned);
-            setMostrarScanner(false);
-            await stopAndClear(scanner);
-          },
-          () => {}
-        );
+        const cameras = await Html5Qrcode.getCameras();
+        const preferred =
+          cameras.find((c: any) => /back|rear|traseira|environment/i.test(c.label)) ?? cameras[0];
+    
+        await scanner.start({ deviceId: { exact: preferred.id } }, config, onDecode, () => {});
       } catch (err) {
-        console.error('Falha ao iniciar scanner:', err);
+        console.error('Falha ao iniciar html5-qrcode:', err);
+        // fallback mínimo
+        try {
+          await scanner.start({ facingMode: 'environment' }, config, onDecode, () => {});
+        } catch (err2) {
+          console.error('Fallback html5-qrcode falhou:', err2);
+        }
       }
     };
-
+  
     start();
-
+  
     return () => {
       cancelled = true;
       stopAndClear(scannerRef.current);
+    
+      if (zxingRef.current) {
+        try { zxingRef.current.reset(); } catch {}
+        zxingRef.current = null;
+      }
     };
   }, [mostrarScanner]);
 
@@ -915,9 +1016,18 @@ export default function Dashboard() {
             </button>
           </div>
 
-          <div className="rounded-[2rem] overflow-hidden bg-black border-2 border-pink-500/30 shadow-2xl shadow-pink-500/10">
-            <div id="reader-dashboard-direct" className="h-[65vh] w-full" />
-          </div>
+          <div className="rounded-[2rem] overflow-hidden bg-black border-2 border-pink-500/30 shadow-2xl shadow-pink-500/10 relative">
+  {/* ZXing usa este video (só será ativado no fallback desktop) */}
+  <video
+    id="zxing-video"
+    className="h-[65vh] w-full object-cover hidden"
+    muted
+    playsInline
+  />
+
+  {/* html5-qrcode usa esta div */}
+  <div id="reader-dashboard-direct" className="h-[65vh] w-full" />
+</div>
 
           {scannerTips}
 
