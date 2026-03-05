@@ -215,6 +215,10 @@ export default function Dashboard() {
   // ✅ controla foco do input para esconder a nav inferior quando teclado abre (iOS)
   const [inputFocado, setInputFocado] = useState(false);
 
+  // ✅ refs para focar após limpar
+  const buscaRef = useRef<HTMLInputElement | null>(null);
+  const buscaScannerRef = useRef<HTMLInputElement | null>(null);
+
   // FILTROS
   const [tamanhosSelecionados, setTamanhosSelecionados] = useState<string[]>([]);
   const [esconderZerados, setEsconderZerados] = useState(false);
@@ -238,6 +242,14 @@ export default function Dashboard() {
   useEffect(() => {
     signedMapRef.current = signedMap;
   }, [signedMap]);
+
+  const clearBusca = (alsoCloseScanner?: boolean) => {
+    setBusca('');
+    if (alsoCloseScanner) setMostrarScanner(false);
+    requestAnimationFrame(() => {
+      buscaRef.current?.focus();
+    });
+  };
 
   // --- 1) Inicializa filtros a partir da URL (querystring) ---
   useEffect(() => {
@@ -380,41 +392,41 @@ export default function Dashboard() {
     return Array.from(set).sort();
   }, [produtos]);
 
-  // Busca + filtros
+  // ✅ Busca + filtros (corrigido: não deixar matchEAN "true" quando busca é texto)
   const filtrados = useMemo(() => {
     const qRaw = busca.toLowerCase().trim();
     const qDigits = qRaw.replace(/\D/g, ''); // só números (EAN costuma ser só dígitos)
-  
+
     return produtos.filter((p) => {
       const total = p.estoque?.reduce((acc: number, item: any) => acc + (item.quantidade || 0), 0) || 0;
-  
+
+      // Texto: fornecedor, descrição, cor (e mantém códigos que você já tinha)
       const matchTexto =
         !qRaw ||
+        p.fornecedor?.toLowerCase().includes(qRaw) ||
         p.descricao?.toLowerCase().includes(qRaw) ||
-        p.codigo_peca?.toLowerCase().includes(qRaw) ||
         p.cor?.toLowerCase().includes(qRaw) ||
-        p.sku_fornecedor?.toLowerCase().includes(qRaw) ||
-        p.fornecedor?.toLowerCase().includes(qRaw);
-  
-      // ✅ NOVO: match por EAN/código de barras
+        p.codigo_peca?.toLowerCase().includes(qRaw) ||
+        p.sku_fornecedor?.toLowerCase().includes(qRaw);
+
+      // EAN: só tenta quando há dígitos na busca (senão não "libera" tudo)
       const matchEAN =
-        !qDigits ||
+        qDigits.length > 0 &&
         p.estoque?.some((e: any) => {
           const bc = String(e.codigo_barras || '');
           const bcDigits = bc.replace(/\D/g, '');
           return bcDigits === qDigits || bcDigits.includes(qDigits);
         });
-  
+
       const matchTamanho =
         tamanhosSelecionados.length === 0 || p.estoque?.some((e: any) => tamanhosSelecionados.includes(e.tamanho?.nome));
-  
+
       const matchFornecedor = !fornecedorSelecionado || p.fornecedor === fornecedorSelecionado;
       const matchEstoque = esconderZerados ? total > 0 : true;
-  
-      // Se o usuário digitou texto, usa matchTexto.
-      // Se digitou números (EAN), também permite matchEAN.
+
+      // Se o usuário digitou algo: aceita texto OU EAN (quando houver dígitos)
       const matchBusca = !qRaw ? true : (matchTexto || matchEAN);
-  
+
       return matchBusca && matchTamanho && matchFornecedor && matchEstoque;
     });
   }, [busca, produtos, tamanhosSelecionados, esconderZerados, fornecedorSelecionado]);
@@ -424,6 +436,7 @@ export default function Dashboard() {
     setFornecedorSelecionado('');
     setEsconderZerados(false);
     setBusca('');
+    requestAnimationFrame(() => buscaRef.current?.focus());
   };
 
   // --- 3) Salvar posição ao sair do dashboard ---
@@ -510,10 +523,10 @@ export default function Dashboard() {
   // --- SCANNER ---
   useEffect(() => {
     if (!mostrarScanner) return;
-  
+
     const elementId = 'reader-dashboard-direct';
     let cancelled = false;
-  
+
     const stopAndClear = async (s: any) => {
       if (!s) return;
       try {
@@ -526,31 +539,33 @@ export default function Dashboard() {
         s.clear?.();
       } catch {}
     };
-  
+
     const start = async () => {
       await new Promise((r) => setTimeout(r, 150));
       if (cancelled) return;
-    
+
       const el = document.getElementById(elementId);
       if (!el) return;
-    
+
       // garante que o container do html5-qrcode esteja limpo/visível
       el.innerHTML = '';
       el.classList.remove('hidden');
-    
+
       // prepara o video do zxing
       const zxingVideo = document.getElementById('zxing-video') as HTMLVideoElement | null;
       if (zxingVideo) zxingVideo.classList.add('hidden');
-    
+
       await stopAndClear(scannerRef.current);
       if (zxingRef.current) {
-        try { zxingRef.current.reset(); } catch {}
+        try {
+          zxingRef.current.reset();
+        } catch {}
         zxingRef.current = null;
       }
-    
+
       // Detecta suporte a BarcodeDetector (fundamental para 1D no desktop)
       const hasBarcodeDetector = typeof (window as any).BarcodeDetector !== 'undefined';
-    
+
       // Se NÃO tiver BarcodeDetector: usar ZXing (desktop fallback)
       if (!hasBarcodeDetector) {
         try {
@@ -558,31 +573,33 @@ export default function Dashboard() {
             import('@zxing/browser'),
             import('@zxing/library'),
           ]);
-    
+
           if (cancelled) return;
-    
+
           if (!zxingVideo) {
             console.error('ZXing video element não encontrado.');
             return;
           }
-    
+
           // esconde html5-qrcode e mostra o video
           el.classList.add('hidden');
           zxingVideo.classList.remove('hidden');
-    
+
           const hints = new Map();
           hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]);
-    
+
           const reader = new BrowserMultiFormatReader(hints, {
             delayBetweenScanAttempts: 200,
           });
           zxingRef.current = {
             reset: () => {
-              // tenta parar a leitura se existir
-              try { (reader as any).stopContinuousDecode?.(); } catch {}
-              try { (reader as any).stopAsyncDecode?.(); } catch {}
-          
-              // para tracks do vídeo para liberar câmera
+              try {
+                (reader as any).stopContinuousDecode?.();
+              } catch {}
+              try {
+                (reader as any).stopAsyncDecode?.();
+              } catch {}
+
               try {
                 const stream = (zxingVideo as any)?.srcObject as MediaStream | null;
                 stream?.getTracks?.().forEach((t) => t.stop());
@@ -590,12 +607,10 @@ export default function Dashboard() {
               } catch {}
             },
           };
-    
+
           const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-          const preferred =
-            devices.find((d: any) => /back|rear|traseira|environment/i.test(d.label)) ?? devices[0];
-    
-          // inicia leitura
+          const preferred = devices.find((d: any) => /back|rear|traseira|environment/i.test(d.label)) ?? devices[0];
+
           reader.decodeFromVideoDevice(preferred?.deviceId, zxingVideo, (result, err) => {
             if (cancelled) return;
             const text = result?.getText?.() ? result.getText() : '';
@@ -603,22 +618,22 @@ export default function Dashboard() {
               const cleaned = String(text).trim();
               setBusca(cleaned);
               setMostrarScanner(false);
-              try { zxingRef.current?.reset(); } catch {}
+              try {
+                zxingRef.current?.reset();
+              } catch {}
             }
           });
-    
-          return; // ✅ não inicia html5-qrcode nesse caminho
+
+          return;
         } catch (err) {
           console.error('Falha ao iniciar ZXing fallback:', err);
-          // se ZXing falhar, cai no html5-qrcode como última tentativa
-          // (vai provavelmente não ler EAN no desktop sem BarcodeDetector, mas ao menos abre câmera)
         }
       }
-    
+
       // --- Caminho padrão (iPhone / browsers com BarcodeDetector): html5-qrcode ---
       let Html5Qrcode: any;
       let Formats: any;
-    
+
       try {
         const mod = await import('html5-qrcode');
         if (cancelled) return;
@@ -628,10 +643,10 @@ export default function Dashboard() {
         console.error('Falha ao carregar html5-qrcode:', err);
         return;
       }
-    
+
       const scanner = new Html5Qrcode(elementId);
       scannerRef.current = scanner;
-    
+
       const config: any = {
         fps: 9,
         qrbox: { width: 280, height: 120 },
@@ -639,11 +654,9 @@ export default function Dashboard() {
         disableFlip: true,
         formatsToSupport: [Formats.EAN_13, Formats.EAN_8],
         experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-    
-        // opcional: resolução ajuda foco sem afetar iPhone negativamente
         videoConstraints: { width: { ideal: 1280 }, height: { ideal: 720 } },
       };
-    
+
       const onDecode = async (decodedText: string) => {
         if (cancelled) return;
         const cleaned = String(decodedText || '').trim();
@@ -652,16 +665,14 @@ export default function Dashboard() {
         setMostrarScanner(false);
         await stopAndClear(scanner);
       };
-    
+
       try {
         const cameras = await Html5Qrcode.getCameras();
-        const preferred =
-          cameras.find((c: any) => /back|rear|traseira|environment/i.test(c.label)) ?? cameras[0];
-    
+        const preferred = cameras.find((c: any) => /back|rear|traseira|environment/i.test(c.label)) ?? cameras[0];
+
         await scanner.start({ deviceId: { exact: preferred.id } }, config, onDecode, () => {});
       } catch (err) {
         console.error('Falha ao iniciar html5-qrcode:', err);
-        // fallback mínimo
         try {
           await scanner.start({ facingMode: 'environment' }, config, onDecode, () => {});
         } catch (err2) {
@@ -669,15 +680,17 @@ export default function Dashboard() {
         }
       }
     };
-  
+
     start();
-  
+
     return () => {
       cancelled = true;
       stopAndClear(scannerRef.current);
-    
+
       if (zxingRef.current) {
-        try { zxingRef.current.reset(); } catch {}
+        try {
+          zxingRef.current.reset();
+        } catch {}
         zxingRef.current = null;
       }
     };
@@ -742,15 +755,36 @@ export default function Dashboard() {
         >
           <div className="relative">
             <input
+              ref={buscaRef}
               type="text"
-              placeholder="Buscar por nome, cor, código ou marca..."
-              className="w-full pl-5 pr-12 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-pink-500 transition-all shadow-lg placeholder:text-slate-600 text-base md:text-sm font-bold"
+              placeholder="Buscar por nome, cor, código, marca ou EAN..."
+              className="w-full pl-5 pr-24 py-4 rounded-2xl bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-pink-500 transition-all shadow-lg placeholder:text-slate-600 text-base md:text-sm font-bold"
               value={busca}
               onChange={(e) => setBusca(e.target.value)}
               onFocus={() => setInputFocado(true)}
               onBlur={() => setInputFocado(false)}
             />
-            <button onClick={() => setMostrarScanner(true)} className="absolute right-4 top-4 text-slate-500 text-xl" aria-label="Scanner">
+
+            {/* ✅ X para limpar (só aparece quando tem texto) */}
+            {busca.trim().length > 0 && (
+              <button
+                onMouseDown={(e) => e.preventDefault()} // evita perder foco no iOS
+                onClick={() => clearBusca(false)}
+                className="absolute right-14 top-1/2 -translate-y-1/2 w-9 h-9 rounded-xl bg-slate-800/60 border border-slate-700 text-slate-200 flex items-center justify-center active:scale-90 transition-transform"
+                aria-label="Limpar busca"
+                title="Limpar"
+              >
+                ✕
+              </button>
+            )}
+
+            {/* Scanner */}
+            <button
+              onClick={() => setMostrarScanner(true)}
+              className="absolute right-4 top-1/2 -translate-y-1/2 w-9 h-9 rounded-xl bg-slate-800/30 border border-slate-800 text-slate-200 flex items-center justify-center active:scale-90 transition-transform"
+              aria-label="Scanner"
+              title="Scanner"
+            >
               📷
             </button>
           </div>
@@ -991,7 +1025,6 @@ export default function Dashboard() {
               <span className="text-[9px] font-black text-white tracking-widest uppercase">Histórico</span>
             </Link>
 
-            {/* ✅ NOVO: RELATÓRIOS */}
             <Link
               href={currentQS ? `/relatorios?${currentQS}` : '/relatorios'}
               onClick={() => saveReturnState()}
@@ -1017,30 +1050,43 @@ export default function Dashboard() {
           </div>
 
           <div className="rounded-[2rem] overflow-hidden bg-black border-2 border-pink-500/30 shadow-2xl shadow-pink-500/10 relative">
-  {/* ZXing usa este video (só será ativado no fallback desktop) */}
-  <video
-    id="zxing-video"
-    className="h-[65vh] w-full object-cover hidden"
-    muted
-    playsInline
-  />
+            {/* ZXing usa este video (só será ativado no fallback desktop) */}
+            <video id="zxing-video" className="h-[65vh] w-full object-cover hidden" muted playsInline />
 
-  {/* html5-qrcode usa esta div */}
-  <div id="reader-dashboard-direct" className="h-[65vh] w-full" />
-</div>
+            {/* html5-qrcode usa esta div */}
+            <div id="reader-dashboard-direct" className="h-[65vh] w-full" />
+          </div>
 
           {scannerTips}
 
           <div className="mt-4">
             <label className="text-[10px] font-black tracking-widest uppercase text-slate-500 block mb-2">Digitar / Colar código</label>
-            <input
-              value={busca}
-              onChange={(e) => setBusca(e.target.value)}
-              onFocus={() => setInputFocado(true)}
-              onBlur={() => setInputFocado(false)}
-              className="w-full bg-slate-900 border border-slate-800 rounded-2xl py-4 px-4 text-white font-bold outline-none text-base"
-              placeholder="Ex: 789..."
-            />
+
+            <div className="relative">
+              <input
+                ref={buscaScannerRef}
+                value={busca}
+                onChange={(e) => setBusca(e.target.value)}
+                onFocus={() => setInputFocado(true)}
+                onBlur={() => setInputFocado(false)}
+                className="w-full bg-slate-900 border border-slate-800 rounded-2xl py-4 pl-4 pr-14 text-white font-bold outline-none text-base"
+                placeholder="Ex: 789..."
+              />
+              {busca.trim().length > 0 && (
+                <button
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    setBusca('');
+                    requestAnimationFrame(() => buscaScannerRef.current?.focus());
+                  }}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-xl bg-slate-800/60 border border-slate-700 text-slate-200 flex items-center justify-center active:scale-90 transition-transform"
+                  aria-label="Limpar busca"
+                  title="Limpar"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
