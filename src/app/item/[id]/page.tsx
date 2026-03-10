@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { supabase } from '../../../lib/supabase';
 import { getSignedUrlCached } from '../../../lib/signedUrlCache';
+import { gerarThumb, thumbPathFromOriginal, extractStoragePath } from '../../../lib/thumbUtils';
 
 // --- UTILITÁRIOS ---
 const formatBRL = (val: number | string) => {
@@ -240,21 +241,35 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     await uploadFoto(file);
   };
 
-  const uploadFoto = async (file: File) => {
-    setModalFoto(false);
-    setLoading(true);
+const uploadFoto = async (file: File) => {
+  setModalFoto(false);
+  setLoading(true);
+  try {
+    const timestamp = Date.now();
+    const filename = `${id}_${timestamp}.jpg`;
+    const path = `migracao/${filename}`;
+    const thumbPath = thumbPathFromOriginal(path); // "migracao/thumbs/id_123.jpg"
+
+    // Upload da foto original
+    await supabase.storage.from('produtos').upload(path, file);
+    const { data } = supabase.storage.from('produtos').getPublicUrl(path);
+    await supabase.from('produtos').update({ foto_url: data.publicUrl }).eq('id', id);
+
+    // Gera e faz upload da thumb (não bloqueia se falhar)
     try {
-      const path = `produtos/${id}_${Date.now()}.jpg`;
-      await supabase.storage.from('produtos').upload(path, file);
-      const { data } = supabase.storage.from('produtos').getPublicUrl(path);
-      await supabase.from('produtos').update({ foto_url: data.publicUrl }).eq('id', id);
-      setFotoTemp(null);
-      await carregarDados();
-    } catch (e) {
-      alert('Erro no upload');
+      const thumbFile = await gerarThumb(file);
+      await supabase.storage.from('produtos').upload(thumbPath, thumbFile, { upsert: true });
+    } catch (thumbErr) {
+      console.warn('Thumb não gerada (não crítico):', thumbErr);
     }
-    setLoading(false);
-  };
+
+    setFotoTemp(null);
+    await carregarDados();
+  } catch (e) {
+    alert('Erro no upload');
+  }
+  setLoading(false);
+};
 
   const abrirCameraFoto = async () => {
     setFotoTemp(null);

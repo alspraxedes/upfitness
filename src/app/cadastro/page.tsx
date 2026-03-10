@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useMemo, Suspense } from 'react';
 import { supabase } from '../../lib/supabase';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { gerarThumb, thumbPathFromOriginal } from '../../lib/thumbUtils';
 
 // --- UTILITÁRIOS ---
 function blobToFile(blob: Blob, filename: string) {
@@ -443,13 +444,26 @@ function CadastroPageInner() {
     setLoading(true);
 
     try {
-      // 1. Upload da Foto (Se houver)
+      // 1. Upload da Foto + Thumb
       let fotoPath: string | null = null;
       if (foto.file) {
-        const path = `produtos/${formData.codigo_peca}_${Date.now()}.jpg`;
+        const timestamp = Date.now();
+        const filename = `${formData.codigo_peca}_${timestamp}.jpg`;
+        const path = `migracao/${filename}`;
+        const thumbPath = thumbPathFromOriginal(path); // "migracao/thumbs/UP001_123.jpg"
+
+        // Upload da foto original
         await supabase.storage.from('produtos').upload(path, foto.file, { upsert: true });
         const { data: pubUrl } = supabase.storage.from('produtos').getPublicUrl(path);
         fotoPath = pubUrl.publicUrl;
+
+        // Gera e faz upload da thumb (não bloqueia o cadastro se falhar)
+        try {
+          const thumbFile = await gerarThumb(foto.file);
+          await supabase.storage.from('produtos').upload(thumbPath, thumbFile, { upsert: true });
+        } catch (thumbErr) {
+          console.warn('Thumb não gerada (não crítico):', thumbErr);
+        }
       }
 
       // 2. Criar Produto
