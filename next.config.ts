@@ -5,7 +5,7 @@ const nextConfig: NextConfig = {
     remotePatterns: [
       {
         protocol: "https",
-        hostname: "jdduvyrrilnxlwbieqjr.supabase.co", // O endereço exato do seu erro
+        hostname: "jdduvyrrilnxlnxlwbieqjr.supabase.co",
       },
     ],
   },

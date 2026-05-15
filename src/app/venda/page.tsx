@@ -176,6 +176,9 @@ function VendaPageInner() {
   const [itemPendente, setItemPendente] = useState<{ produto: Produto; est: EstoqueItem } | null>(null);
   const [mostrarRecibo, setMostrarRecibo] = useState(false);
   const [dadosRecibo, setDadosRecibo] = useState<any>(null);
+  const [nomeCliente, setNomeCliente] = useState('');
+  const [clientesExistentes, setClientesExistentes] = useState<string[]>([]);
+  const [mostrarSugestoes, setMostrarSugestoes] = useState(false);
 
   const [pagamento, setPagamento] = useState({
     metodo: 'pix',
@@ -469,6 +472,11 @@ function VendaPageInner() {
   const qtdItensCarrinho = carrinho.reduce((acc, item) => acc + item.qtd, 0);
   const itensZerados = useMemo(() => carrinho.filter((i) => (i.maxEstoque ?? 0) <= 0), [carrinho]);
   const temZerados = itensZerados.length > 0;
+  const sugestoesFiltradas = useMemo(() => {
+    const q = nomeCliente.trim().toLowerCase();
+    if (!q) return clientesExistentes;
+    return clientesExistentes.filter((n) => n.toLowerCase().includes(q));
+  }, [nomeCliente, clientesExistentes]);
 
   function bloquearFechamentoSeZerados() {
     if (!temZerados) return false;
@@ -477,10 +485,28 @@ function VendaPageInner() {
     return true;
   }
 
-  function abrirModalPagamento() {
+  async function abrirModalPagamento() {
     if (carrinho.length === 0) return alert('Carrinho vazio.');
     if (bloquearFechamentoSeZerados()) return;
     setPagamento({ metodo: 'pix', parcelas: 1, descontoTipo: 'reais', descontoValor: 0, valorFinal: totalBruto });
+    const { data: clientesData } = await supabase
+  .from('vendas')
+  .select('nome_cliente')
+  .not('nome_cliente', 'is', null)
+  .neq('nome_cliente', '');
+ 
+const nomesUnicos = Array.from(
+  new Set(
+    (clientesData ?? [])
+      .map((v: any) => v.nome_cliente as string)
+      .filter(Boolean)
+      .map((n) => n.trim())
+  )
+).sort((a, b) => a.localeCompare('pt-BR'));
+ 
+setClientesExistentes(nomesUnicos);
+setNomeCliente('');
+setMostrarSugestoes(false);
     setModalPagamento(true);
   }
 
@@ -592,15 +618,47 @@ function VendaPageInner() {
   async function confirmarVenda() {
     if (bloquearFechamentoSeZerados()) return;
     setLoading(true);
-    const itensPayload = carrinho.map((i) => ({ produto_id: i.produto_id, estoque_id: i.estoque_id, descricao_completa: `${i.descricao} - ${i.cor} (${i.tamanho})`, quantidade: i.qtd, preco_unitario: i.preco, subtotal: i.preco * i.qtd }));
-    const { error } = await supabase.rpc('realizar_venda', { p_valor_bruto: totalBruto, p_valor_liquido: pagamento.valorFinal, p_desconto: totalBruto - pagamento.valorFinal, p_forma_pagamento: pagamento.metodo, p_parcelas: pagamento.metodo === 'credito' ? pagamento.parcelas : 1, p_itens: itensPayload });
+    const itensPayload = carrinho.map((i) => ({
+      produto_id: i.produto_id,
+      estoque_id: i.estoque_id,
+      descricao_completa: `${i.descricao} - ${i.cor} (${i.tamanho})`,
+      cor: i.cor,                          // NOVO
+      quantidade: i.qtd,
+      preco_unitario: i.preco,
+      subtotal: i.preco * i.qtd,
+    }));
+   
+    const { error } = await supabase.rpc('realizar_venda', {
+      p_valor_bruto: totalBruto,
+      p_valor_liquido: pagamento.valorFinal,
+      p_desconto: totalBruto - pagamento.valorFinal,
+      p_forma_pagamento: pagamento.metodo,
+      p_parcelas: pagamento.metodo === 'credito' ? pagamento.parcelas : 1,
+      p_itens: itensPayload,
+      p_nome_cliente: nomeCliente.trim() || null,  // NOVO
+    });
     setLoading(false);
     if (error) { alert('Erro: ' + error.message); return; }
     if (draftAtualId) { await supabase.from('venda_drafts').delete().eq('id', draftAtualId); setDraftAtualId(null); setDraftAtualTitulo(''); await fetchDrafts(); }
-    setDadosRecibo({ itens: carrinho.map((i) => ({ descricao: i.descricao, quantidade: i.qtd, preco_venda: i.preco, tamanho: i.tamanho })), subtotal: totalBruto, desconto: totalBruto - pagamento.valorFinal, totalFinal: pagamento.valorFinal, metodoPagamento: pagamento.metodo, data: new Date() });
+    setDadosRecibo({
+      itens: carrinho.map((i) => ({
+        descricao: i.descricao,
+        quantidade: i.qtd,
+        preco_venda: i.preco,
+        tamanho: i.tamanho,
+        cor: i.cor,                              // NOVO
+      })),
+      subtotal: totalBruto,
+      desconto: totalBruto - pagamento.valorFinal,
+      totalFinal: pagamento.valorFinal,
+      metodoPagamento: pagamento.metodo,
+      data: new Date(),
+      cliente: nomeCliente.trim() || undefined,  // NOVO
+    });
     setMostrarRecibo(true);
     setModalPagamento(false);
     setCarrinho([]);
+    setNomeCliente('');
     setAbaMobile('busca');
     await fetchProdutos();
   }
@@ -1035,6 +1093,54 @@ function VendaPageInner() {
               <button onClick={() => setModalPagamento(false)} className="w-10 h-10 rounded-full bg-slate-800 text-slate-400 hover:text-white font-bold transition active:scale-90">✕</button>
             </div>
             <div className="flex-1 overflow-y-auto p-6 space-y-8">
+            <div className="space-y-2 relative">
+    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">
+      Nome da Cliente{' '}
+      <span className="text-slate-600 normal-case font-normal">(opcional)</span>
+    </label>
+    <input
+      type="text"
+      placeholder="Ex: Paty Maionese"
+      autoComplete="off"
+      className="w-full bg-slate-950 border-2 border-slate-800 focus:border-pink-500 outline-none p-4 rounded-2xl text-white font-bold text-base placeholder:text-slate-600 h-16"
+      value={nomeCliente}
+      onChange={(e) => {
+        setNomeCliente(e.target.value);
+        setMostrarSugestoes(true);
+      }}
+      onFocus={() => setMostrarSugestoes(true)}
+      onBlur={() => setTimeout(() => setMostrarSugestoes(false), 150)}
+    />
+ 
+    {/* Dropdown de sugestões */}
+    {mostrarSugestoes && sugestoesFiltradas.length > 0 && (
+      <div className="absolute left-0 right-0 z-50 bg-slate-900 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl max-h-48 overflow-y-auto">
+        {sugestoesFiltradas.map((nome) => (
+          <button
+            key={nome}
+            type="button"
+            onMouseDown={() => {
+              setNomeCliente(nome);
+              setMostrarSugestoes(false);
+            }}
+            className="w-full text-left px-4 py-3 text-sm font-bold text-white hover:bg-pink-600 transition-colors border-b border-slate-800 last:border-0"
+          >
+            {nome}
+          </button>
+        ))}
+      </div>
+    )}
+ 
+    {/* Badge: novo cliente */}
+    {nomeCliente.trim() &&
+      !clientesExistentes.some(
+        (n) => n.toLowerCase() === nomeCliente.trim().toLowerCase()
+      ) && (
+        <p className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest px-1">
+          ✦ Novo cliente
+        </p>
+      )}
+  </div>
               <div className="space-y-4">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Desconto / Ajuste</label>
                 <div className="grid grid-cols-1 min-[400px]:grid-cols-2 gap-4">

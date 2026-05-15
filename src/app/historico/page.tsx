@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { supabase } from '../../lib/supabase';
 import { useSearchParams } from 'next/navigation';
 
-// --- TIPOS ATUALIZADOS ---
+// --- TIPOS ---
 type ItemVenda = {
   id: string;
   descricao_completa: string;
@@ -31,6 +31,7 @@ type Venda = {
   forma_pagamento: string;
   desconto: number;
   parcelas: number;
+  nome_cliente: string | null;
   itens_venda: ItemVenda[];
 };
 
@@ -55,7 +56,6 @@ function getQS(searchParams: ReturnType<typeof useSearchParams>) {
 }
 
 export default function HistoricoPage() {
-  // Next.js / Vercel: useSearchParams precisa estar em Suspense
   return (
     <Suspense fallback={<div className="min-h-screen bg-slate-950 text-slate-100" />}>
       <HistoricoPageInner />
@@ -73,21 +73,28 @@ function HistoricoPageInner() {
   // Filtros
   const [dataInicio, setDataInicio] = useState('');
   const [dataFim, setDataFim] = useState('');
-
-  // Persistência
   const STORAGE_KEY = 'upfitness_historico_filtros_v1';
 
-  // Controles de Visualização
+  // Visualização
   const [expandidoId, setExpandidoId] = useState<string | null>(null);
   const [vendaRecibo, setVendaRecibo] = useState<Venda | null>(null);
 
-  // Controles de Exclusão/Cancelamento
+  // Exclusão/Cancelamento
   const [modalConfirmacao, setModalConfirmacao] = useState<{ tipo: 'apagar' | 'cancelar'; venda: Venda } | null>(null);
   const [processandoAcao, setProcessandoAcao] = useState(false);
 
+  // Edição inline de cliente
+  const [editandoClienteId, setEditandoClienteId] = useState<string | null>(null);
+  const [editandoClienteValor, setEditandoClienteValor] = useState('');
+  const [salvandoCliente, setSalvandoCliente] = useState(false);
+
+  // Autocomplete
+  const [clientesExistentes, setClientesExistentes] = useState<string[]>([]);
+  const [mostrarSugestoes, setMostrarSugestoes] = useState(false);
+
   const printRef = useRef<HTMLDivElement>(null);
 
-  // Carrega filtros do localStorage (client-only)
+  // Carrega filtros do localStorage + busca clientes ao montar
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -96,36 +103,31 @@ function HistoricoPageInner() {
         if (typeof parsed?.dataInicio === 'string') setDataInicio(parsed.dataInicio);
         if (typeof parsed?.dataFim === 'string') setDataFim(parsed.dataFim);
       }
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
+    fetchClientes();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Salva filtros sempre que mudarem
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ dataInicio, dataFim }));
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   }, [dataInicio, dataFim]);
 
-  // Busca vendas sempre que filtros mudarem (com debounce leve)
+  // Busca vendas com debounce leve sempre que filtros mudarem
   useEffect(() => {
-    const t = setTimeout(() => {
-      fetchVendas();
-    }, 150);
+    const t = setTimeout(() => { fetchVendas(); }, 150);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataInicio, dataFim]);
 
+  // --- FETCH VENDAS ---
   async function fetchVendas() {
     setLoading(true);
-
     let query = supabase
       .from('vendas')
-      .select(
-        `
+      .select(`
         *,
         itens_venda (
           *,
@@ -133,8 +135,7 @@ function HistoricoPageInner() {
             produto:produtos ( preco_compra, custo_frete, custo_embalagem )
           )
         )
-      `
-      )
+      `)
       .order('created_at', { ascending: false });
 
     if (dataInicio) query = query.gte('created_at', `${dataInicio}T00:00:00`);
@@ -142,7 +143,6 @@ function HistoricoPageInner() {
     else if (!dataInicio) query = query.limit(50);
 
     const { data, error } = await query;
-
     if (error) {
       console.error(error);
       alert('Erro ao buscar vendas: ' + error.message);
@@ -150,18 +150,88 @@ function HistoricoPageInner() {
     } else {
       setVendas((data as any) || []);
     }
-
     setLoading(false);
   }
 
-  // --- CÁLCULOS FINANCEIROS (Memoizado) ---
+  // --- FETCH CLIENTES (para autocomplete) ---
+  async function fetchClientes() {
+    const { data } = await supabase
+      .from('vendas')
+      .select('nome_cliente')
+      .not('nome_cliente', 'is', null)
+      .neq('nome_cliente', '');
+
+    const nomesUnicos = Array.from(
+      new Set(
+        (data ?? [])
+          .map((v: any) => v.nome_cliente as string)
+          .filter(Boolean)
+          .map((n) => n.trim())
+      )
+    ).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+
+    setClientesExistentes(nomesUnicos);
+  }
+
+  // --- AUTOCOMPLETE FILTRADO ---
+  const sugestoesFiltradas = useMemo(() => {
+    const q = editandoClienteValor.trim().toLowerCase();
+    if (!q) return clientesExistentes;
+    return clientesExistentes.filter((n) => n.toLowerCase().includes(q));
+  }, [editandoClienteValor, clientesExistentes]);
+
+  // --- EDIÇÃO INLINE DE CLIENTE ---
+  function iniciarEdicaoCliente(venda: Venda) {
+    setEditandoClienteId(venda.id);
+    setEditandoClienteValor(venda.nome_cliente ?? '');
+    setMostrarSugestoes(false);
+  }
+
+  function cancelarEdicaoCliente() {
+    setEditandoClienteId(null);
+    setEditandoClienteValor('');
+    setMostrarSugestoes(false);
+  }
+
+  async function salvarNomeCliente(vendaId: string) {
+    setSalvandoCliente(true);
+    const novoNome = editandoClienteValor.trim() || null;
+    try {
+      const { error } = await supabase
+        .from('vendas')
+        .update({ nome_cliente: novoNome })
+        .eq('id', vendaId);
+
+      if (error) throw error;
+
+      // Atualiza localmente sem refetch completo
+      setVendas((prev) =>
+        prev.map((v) => v.id === vendaId ? { ...v, nome_cliente: novoNome } : v)
+      );
+
+      // Se for um nome novo, adiciona à lista de autocomplete
+      if (novoNome && !clientesExistentes.some((n) => n.toLowerCase() === novoNome.toLowerCase())) {
+        setClientesExistentes((prev) =>
+          [...prev, novoNome].sort((a, b) => a.localeCompare(b, 'pt-BR'))
+        );
+      }
+
+      setEditandoClienteId(null);
+      setEditandoClienteValor('');
+      setMostrarSugestoes(false);
+    } catch (err: any) {
+      alert('Erro ao salvar: ' + (err?.message || String(err)));
+    } finally {
+      setSalvandoCliente(false);
+    }
+  }
+
+  // --- MÉTRICAS ---
   const metricas = useMemo(() => {
     let faturamento = 0;
     let custoTotal = 0;
-
     vendas.forEach((venda) => {
       faturamento += venda.valor_liquido || 0;
-
       venda.itens_venda.forEach((item) => {
         const prod = item.estoque?.produto;
         if (prod) {
@@ -170,19 +240,16 @@ function HistoricoPageInner() {
         }
       });
     });
-
     const lucro = faturamento - custoTotal;
     const margem = custoTotal > 0 ? (lucro / custoTotal) * 100 : 0;
-
     return { faturamento, custoTotal, lucro, margem };
   }, [vendas]);
 
-  // Lógica de Cancelamento/Exclusão
+  // --- CANCELAMENTO / EXCLUSÃO ---
   const executarAcao = async () => {
     if (!modalConfirmacao) return;
     setProcessandoAcao(true);
     const { tipo, venda } = modalConfirmacao;
-
     try {
       if (tipo === 'cancelar') {
         for (const item of venda.itens_venda) {
@@ -191,23 +258,18 @@ function HistoricoPageInner() {
             .select('quantidade')
             .eq('id', item.estoque_id)
             .single();
-
           if (errEst) throw errEst;
-
           if (estAtual) {
             const { error: errUp } = await supabase
               .from('estoque')
               .update({ quantidade: estAtual.quantidade + item.quantidade })
               .eq('id', item.estoque_id);
-
             if (errUp) throw errUp;
           }
         }
       }
-
       const { error } = await supabase.from('vendas').delete().eq('id', venda.id);
       if (error) throw error;
-
       setModalConfirmacao(null);
       await fetchVendas();
     } catch (err: any) {
@@ -217,6 +279,7 @@ function HistoricoPageInner() {
     }
   };
 
+  // --- IMPRESSÃO ---
   const handlePrint = () => {
     const conteudo = printRef.current?.innerHTML;
     const janela = window.open('', '', 'height=600,width=400');
@@ -230,40 +293,54 @@ function HistoricoPageInner() {
     }
   };
 
+  // --- WHATSAPP CORRIGIDO ---
   const handleWhatsApp = (v: Venda) => {
-    let texto = `*COMPROVANTE UPFITNESS - PEDIDO #${v.codigo_venda}*%0A--------------------------------%0A`;
-    v.itens_venda.forEach((item) => (texto += `${item.quantidade}x ${item.descricao_completa}%0A`));
-    texto += `--------------------------------%0A*TOTAL: ${formatBRL(v.valor_liquido)}*`;
-    window.open(`https://wa.me/?text=${texto}`, '_blank');
+    const f = (n: number) =>
+      new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(n);
+
+    const linhas: string[] = [];
+    linhas.push(`*COMPROVANTE UPFITNESS — PEDIDO #${v.codigo_venda}*`);
+    linhas.push('--------------------------------');
+
+    v.itens_venda.forEach((item) => {
+      linhas.push(`${item.quantidade}x ${item.descricao_completa} | ${f(item.subtotal)}`);
+    });
+
+    linhas.push('--------------------------------');
+    if (v.desconto > 0) {
+      linhas.push(`Subtotal: ${f(v.valor_total)}`);
+      linhas.push(`Desconto: - ${f(v.desconto)}`);
+    }
+    linhas.push(`*TOTAL: ${f(v.valor_liquido)}*`);
+    linhas.push(`Pagamento: ${v.forma_pagamento}${v.parcelas > 1 ? ` (${v.parcelas}x)` : ''}`);
+    linhas.push(`Data: ${formatData(v.created_at)}`);
+
+    const texto = linhas.join('\n');
+    window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank', 'noopener,noreferrer');
   };
 
   const limparFiltros = () => {
     setDataInicio('');
     setDataFim('');
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // ignore
-    }
+    try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
   };
 
+  // --- RENDER ---
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans pb-24">
+
       {/* HEADER */}
       <header className="bg-slate-900 p-6 border-b border-slate-800 sticky top-0 z-20 shadow-xl space-y-4">
         <div className="flex items-center gap-4">
-          {/* Voltar mantendo querystring (persistência de filtros do dashboard) */}
           <Link
             href={`/${dashQS}`}
             className="bg-slate-800 p-2 rounded-full text-slate-400 hover:text-white border border-slate-700 active:scale-95 transition"
           >
             ←
           </Link>
-          <div>
-            <h1 className="font-black italic text-xl uppercase tracking-tighter">
-              Histórico <span className="text-pink-600">Vendas</span>
-            </h1>
-          </div>
+          <h1 className="font-black italic text-xl uppercase tracking-tighter">
+            Histórico <span className="text-pink-600">Vendas</span>
+          </h1>
         </div>
 
         <div className="flex flex-col md:flex-row gap-3">
@@ -281,7 +358,6 @@ function HistoricoPageInner() {
               className="bg-slate-950 border border-slate-700 text-white rounded-xl px-3 py-2 w-full text-xs font-bold uppercase"
             />
           </div>
-
           <div className="flex gap-2">
             <button
               onClick={fetchVendas}
@@ -292,7 +368,6 @@ function HistoricoPageInner() {
             <button
               onClick={limparFiltros}
               className="bg-slate-800 text-slate-200 px-4 py-2 rounded-xl font-black uppercase text-xs tracking-widest border border-slate-700 hover:bg-slate-700 active:scale-95 transition"
-              title="Limpar filtros salvos"
             >
               Limpar
             </button>
@@ -301,7 +376,8 @@ function HistoricoPageInner() {
       </header>
 
       <main className="max-w-4xl mx-auto p-4 space-y-6">
-        {/* DASHBOARD DE MÉTRICAS */}
+
+        {/* MÉTRICAS */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between">
             <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Faturamento</span>
@@ -321,6 +397,7 @@ function HistoricoPageInner() {
           </div>
         </div>
 
+        {/* LISTA DE VENDAS */}
         {loading ? (
           <div className="text-center py-10 opacity-50 animate-pulse">
             <p className="text-xs font-bold uppercase">Buscando vendas...</p>
@@ -334,12 +411,12 @@ function HistoricoPageInner() {
           <div className="space-y-3">
             {vendas.map((venda) => {
               const isExpanded = expandidoId === venda.id;
+              const isEditandoCliente = editandoClienteId === venda.id;
 
               const custoVenda = venda.itens_venda.reduce((acc, item) => {
                 const p = item.estoque?.produto;
                 return acc + item.quantidade * ((p?.preco_compra || 0) + (p?.custo_frete || 0) + (p?.custo_embalagem || 0));
               }, 0);
-
               const lucroVenda = (venda.valor_liquido || 0) - custoVenda;
 
               return (
@@ -349,39 +426,171 @@ function HistoricoPageInner() {
                     isExpanded ? 'border-pink-500/50 shadow-pink-900/10 shadow-lg' : 'border-slate-800 hover:border-slate-700'
                   }`}
                 >
-                  <button onClick={() => setExpandidoId(isExpanded ? null : venda.id)} className="w-full p-4 flex justify-between items-center text-left">
+                  {/* CABEÇALHO DO CARD */}
+                  <button
+                    onClick={() => setExpandidoId(isExpanded ? null : venda.id)}
+                    className="w-full p-4 flex justify-between items-center text-left"
+                  >
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-xs font-bold text-slate-300 bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700 font-mono">
                           #{venda.codigo_venda}
                         </span>
-                        <span className="text-[10px] text-slate-400 font-bold uppercase">{formatData(venda.created_at)}</span>
+                        <span className="text-[10px] text-slate-400 font-bold uppercase">
+                          {formatData(venda.created_at)}
+                        </span>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span
                           className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded text-slate-950 ${
-                            venda.forma_pagamento === 'pix' ? 'bg-emerald-400' : venda.forma_pagamento === 'credito' ? 'bg-blue-400' : 'bg-yellow-400'
+                            venda.forma_pagamento === 'pix'
+                              ? 'bg-emerald-400'
+                              : venda.forma_pagamento === 'credito'
+                              ? 'bg-blue-400'
+                              : 'bg-yellow-400'
                           }`}
                         >
                           {venda.forma_pagamento}
                         </span>
-                        {!isExpanded && <span className="text-[10px] text-slate-500 font-bold uppercase">{venda.itens_venda.length} itens</span>}
+                        {!isExpanded && (
+                          <span className="text-[10px] text-slate-500 font-bold uppercase">
+                            {venda.itens_venda.length} itens
+                          </span>
+                        )}
+                        {!isExpanded && venda.nome_cliente?.trim() && (
+                          <span className="text-[10px] text-pink-400 font-bold truncate max-w-[140px]">
+                            👤 {venda.nome_cliente.trim()}
+                          </span>
+                        )}
                       </div>
                     </div>
 
                     <div className="text-right">
-                      <span className="block text-lg font-black text-white">{formatBRL(venda.valor_liquido)}</span>
-                      {isExpanded && <span className="block text-[10px] font-bold text-emerald-500">Lucro: {formatBRL(lucroVenda)}</span>}
-                      <span className="text-[10px] text-slate-500 uppercase font-bold">{isExpanded ? '▲ Recolher' : '▼ Detalhes'}</span>
+                      <span className="block text-lg font-black text-white">
+                        {formatBRL(venda.valor_liquido)}
+                      </span>
+                      {isExpanded && (
+                        <span className="block text-[10px] font-bold text-emerald-500">
+                          Lucro: {formatBRL(lucroVenda)}
+                        </span>
+                      )}
+                      <span className="text-[10px] text-slate-500 uppercase font-bold">
+                        {isExpanded ? '▲ Recolher' : '▼ Detalhes'}
+                      </span>
                     </div>
                   </button>
 
+                  {/* DETALHES EXPANDIDOS */}
                   {isExpanded && (
-                    <div className="bg-slate-950/50 border-t border-slate-800 p-4 animate-in slide-in-from-top-2 duration-200">
-                      <div className="space-y-2 mb-4">
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-2">Itens do Pedido</p>
+                    <div className="bg-slate-950/50 border-t border-slate-800 p-4 animate-in slide-in-from-top-2 duration-200 space-y-4">
+
+                      {/* BLOCO DE CLIENTE */}
+                      <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-3">
+                        <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-2">
+                          Cliente
+                        </p>
+
+                        {isEditandoCliente ? (
+                          /* MODO EDIÇÃO COM AUTOCOMPLETE */
+                          <div className="flex flex-col gap-2">
+                            <div className="relative">
+                              <div className="flex gap-2 items-center">
+                                <input
+                                  type="text"
+                                  autoFocus
+                                  autoComplete="off"
+                                  placeholder="Nome da cliente..."
+                                  value={editandoClienteValor}
+                                  onChange={(e) => {
+                                    setEditandoClienteValor(e.target.value);
+                                    setMostrarSugestoes(true);
+                                  }}
+                                  onFocus={() => setMostrarSugestoes(true)}
+                                  onBlur={() => setTimeout(() => setMostrarSugestoes(false), 150)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') salvarNomeCliente(venda.id);
+                                    if (e.key === 'Escape') cancelarEdicaoCliente();
+                                  }}
+                                  className="flex-1 bg-slate-950 border-2 border-pink-500 outline-none rounded-xl px-3 py-2 text-sm font-bold text-white placeholder:text-slate-600"
+                                />
+                                <button
+                                  onClick={() => salvarNomeCliente(venda.id)}
+                                  disabled={salvandoCliente}
+                                  className="bg-pink-600 hover:bg-pink-500 text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest active:scale-95 disabled:opacity-50 whitespace-nowrap"
+                                >
+                                  {salvandoCliente ? '...' : 'Salvar'}
+                                </button>
+                                <button
+                                  onClick={cancelarEdicaoCliente}
+                                  disabled={salvandoCliente}
+                                  className="bg-slate-800 hover:bg-slate-700 text-slate-400 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest active:scale-95"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+
+                              {/* Dropdown de sugestões */}
+                              {mostrarSugestoes && sugestoesFiltradas.length > 0 && (
+                                <div className="absolute left-0 right-0 z-50 bg-slate-900 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl max-h-40 overflow-y-auto mt-1">
+                                  {sugestoesFiltradas.map((nome) => (
+                                    <button
+                                      key={nome}
+                                      type="button"
+                                      onMouseDown={() => {
+                                        setEditandoClienteValor(nome);
+                                        setMostrarSugestoes(false);
+                                      }}
+                                      className="w-full text-left px-4 py-2.5 text-sm font-bold text-white hover:bg-pink-600 transition-colors border-b border-slate-800 last:border-0"
+                                    >
+                                      {nome}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Badge novo cliente */}
+                            {editandoClienteValor.trim() &&
+                              !clientesExistentes.some(
+                                (n) => n.toLowerCase() === editandoClienteValor.trim().toLowerCase()
+                              ) && (
+                                <p className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest px-1">
+                                  ✦ Novo cliente
+                                </p>
+                              )}
+                          </div>
+                        ) : (
+                          /* MODO LEITURA */
+                          <div className="flex items-center justify-between gap-3">
+                            {venda.nome_cliente?.trim() ? (
+                              <p className="text-sm font-black text-white truncate">
+                                👤 {venda.nome_cliente.trim()}
+                              </p>
+                            ) : (
+                              <p className="text-sm font-bold text-slate-600 italic">
+                                Sem cliente registrado
+                              </p>
+                            )}
+                            <button
+                              onClick={() => iniciarEdicaoCliente(venda)}
+                              className="shrink-0 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-pink-400 bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-xl active:scale-95 transition-colors"
+                            >
+                              ✏️ {venda.nome_cliente?.trim() ? 'Editar' : 'Adicionar'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ITENS */}
+                      <div className="space-y-2">
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                          Itens do Pedido
+                        </p>
                         {venda.itens_venda.map((item) => (
-                          <div key={item.id} className="flex justify-between items-center text-sm border-b border-slate-800/50 pb-2 last:border-0 last:pb-0">
+                          <div
+                            key={item.id}
+                            className="flex justify-between items-center text-sm border-b border-slate-800/50 pb-2 last:border-0 last:pb-0"
+                          >
                             <div className="text-slate-300">
                               <span className="font-bold text-slate-500 mr-2">{item.quantidade}x</span>
                               {item.descricao_completa}
@@ -391,15 +600,15 @@ function HistoricoPageInner() {
                         ))}
                       </div>
 
-                      <div className="flex flex-col gap-2 pt-2 border-t border-slate-800/50 mt-2">
+                      {/* AÇÕES */}
+                      <div className="flex flex-col gap-2 pt-2 border-t border-slate-800/50">
                         <button
                           onClick={() => setVendaRecibo(venda)}
                           className="w-full bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-xl font-bold uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 transition"
                         >
                           📄 Ver Recibo / Imprimir
                         </button>
-
-                        <div className="flex gap-2 mt-1">
+                        <div className="flex gap-2">
                           <button
                             onClick={() => setModalConfirmacao({ tipo: 'apagar', venda })}
                             className="flex-1 bg-red-950/30 hover:bg-red-900/50 text-red-500 border border-red-900/50 py-3 rounded-xl font-bold uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 transition"
@@ -432,6 +641,7 @@ function HistoricoPageInner() {
                 <h3 className="font-black text-xl uppercase tracking-tighter">UPFITNESS</h3>
                 <p className="text-xs text-slate-500">Recibo #{vendaRecibo.codigo_venda}</p>
                 <p className="text-[10px] mt-1">{formatData(vendaRecibo.created_at)}</p>
+                
               </div>
 
               <div className="space-y-3 mb-6">
@@ -443,8 +653,6 @@ function HistoricoPageInner() {
                       </div>
                       <div className="font-bold whitespace-nowrap">{formatBRL(item.subtotal)}</div>
                     </div>
-
-                    {/* ✅ NOVO: preço unitário */}
                     <div className="text-[10px] text-slate-500 text-right">
                       {formatBRL(item.preco_unitario)} un.
                     </div>
@@ -468,7 +676,8 @@ function HistoricoPageInner() {
                   <span>{formatBRL(vendaRecibo.valor_liquido)}</span>
                 </div>
                 <div className="text-[10px] uppercase text-slate-500 mt-2">
-                  Pagamento via {vendaRecibo.forma_pagamento} {vendaRecibo.parcelas > 1 ? ` (${vendaRecibo.parcelas}x)` : ''}
+                  Pagamento via {vendaRecibo.forma_pagamento}
+                  {vendaRecibo.parcelas > 1 ? ` (${vendaRecibo.parcelas}x)` : ''}
                 </div>
               </div>
             </div>
@@ -502,37 +711,40 @@ function HistoricoPageInner() {
       {/* MODAL CONFIRMAÇÃO */}
       {modalConfirmacao && (
         <div className="fixed inset-0 z-[60] bg-black/95 backdrop-blur-md flex items-center justify-center p-6 animate-in zoom-in-95 duration-200">
-          <div className="bg-slate-900 w-full max-w-sm rounded-3xl border border-slate-700 p-6 shadow-2xl relative">
+          <div className="bg-slate-900 w-full max-w-sm rounded-3xl border border-slate-700 p-6 shadow-2xl">
             <div className="text-center space-y-4">
               <div
                 className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto text-3xl ${
-                  modalConfirmacao.tipo === 'cancelar' ? 'bg-orange-500/20 text-orange-500' : 'bg-red-500/20 text-red-500'
+                  modalConfirmacao.tipo === 'cancelar'
+                    ? 'bg-orange-500/20 text-orange-500'
+                    : 'bg-red-500/20 text-red-500'
                 }`}
               >
                 {modalConfirmacao.tipo === 'cancelar' ? '🚫' : '🗑️'}
               </div>
-
-              <h3 className="text-xl font-black uppercase text-white">{modalConfirmacao.tipo === 'cancelar' ? 'Cancelar Venda?' : 'Apagar Registro?'}</h3>
-
+              <h3 className="text-xl font-black uppercase text-white">
+                {modalConfirmacao.tipo === 'cancelar' ? 'Cancelar Venda?' : 'Apagar Registro?'}
+              </h3>
               <p className="text-sm text-slate-400 leading-relaxed">
                 {modalConfirmacao.tipo === 'cancelar' ? (
                   <span>
-                    Você está prestes a cancelar a venda <b>#{modalConfirmacao.venda.codigo_venda}</b>.
-                    <br />
-                    <br />
-                    <span className="text-orange-400 font-bold">⚠️ O estoque dos itens será devolvido automaticamente.</span>
+                    Você está prestes a cancelar a venda{' '}
+                    <b>#{modalConfirmacao.venda.codigo_venda}</b>.<br /><br />
+                    <span className="text-orange-400 font-bold">
+                      ⚠️ O estoque dos itens será devolvido automaticamente.
+                    </span>
                   </span>
                 ) : (
                   <span>
-                    Você vai remover o registro da venda <b>#{modalConfirmacao.venda.codigo_venda}</b> do histórico.
-                    <br />
-                    <br />
-                    <span className="text-red-400 font-bold">⚠️ O estoque NÃO será alterado.</span>
+                    Você vai remover o registro da venda{' '}
+                    <b>#{modalConfirmacao.venda.codigo_venda}</b> do histórico.<br /><br />
+                    <span className="text-red-400 font-bold">
+                      ⚠️ O estoque NÃO será alterado.
+                    </span>
                   </span>
                 )}
               </p>
             </div>
-
             <div className="grid grid-cols-2 gap-3 mt-8">
               <button
                 onClick={() => setModalConfirmacao(null)}
@@ -540,12 +752,13 @@ function HistoricoPageInner() {
               >
                 Voltar
               </button>
-
               <button
                 onClick={executarAcao}
                 disabled={processandoAcao}
                 className={`py-4 rounded-xl font-black uppercase text-xs tracking-widest transition text-white shadow-lg ${
-                  modalConfirmacao.tipo === 'cancelar' ? 'bg-orange-600 hover:bg-orange-500' : 'bg-red-600 hover:bg-red-500'
+                  modalConfirmacao.tipo === 'cancelar'
+                    ? 'bg-orange-600 hover:bg-orange-500'
+                    : 'bg-red-600 hover:bg-red-500'
                 }`}
               >
                 {processandoAcao ? 'Processando...' : 'Confirmar'}
