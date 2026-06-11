@@ -7,6 +7,7 @@ import { Html5Qrcode } from 'html5-qrcode';
 import Cropper from 'react-easy-crop';
 import { useSearchParams } from 'next/navigation';
 import { gerarThumb, thumbPathFromOriginal } from '../../lib/thumbUtils';
+import { playBeep } from '../../lib/sound';
 
 import ReciboModal from '../components/ReciboModal';
 
@@ -90,15 +91,6 @@ type PedidoCatalogoItem = {
 
 // --- UTILITÁRIOS ---
 const formatBRL = (val: number) => val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-
-const playBeep = () => {
-  const audio = new Audio('https://www.soundjay.com/buttons/beep-01a.mp3');
-  audio.volume = 0.5;
-  audio.play().catch(() => {});
-  if (typeof window !== 'undefined' && window.navigator && (window.navigator as any).vibrate) {
-    (window.navigator as any).vibrate(50);
-  }
-};
 
 const ordenarEstoque = (estoque: EstoqueItem[]) => {
   return [...estoque].sort((a, b) => (a.tamanho?.ordem ?? 999) - (b.tamanho?.ordem ?? 999));
@@ -212,6 +204,18 @@ function VendaPageInner() {
     })();
   }, []);
 
+  // PWA fica aberto o dia inteiro: ao voltar para a aba, atualiza a lista
+  // de produtos (estoque cadastrado/vendido nesse meio tempo aparece sem
+  // precisar recarregar a página). O carrinho em montagem não é tocado.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') fetchProdutos();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const produtosDisponiveis = useMemo(() => {
     return produtos.filter((p) => {
       const total = p.estoque.reduce((acc, est) => acc + (Number(est.quantidade) || 0), 0);
@@ -300,14 +304,25 @@ function VendaPageInner() {
   };
 
   async function fetchProdutos(): Promise<Produto[]> {
-    const { data, error } = await supabase
-      .from('produtos')
-      .select(`id, codigo_peca, sku_fornecedor, descricao, cor, foto_url, preco_venda, preco_compra, custo_frete, custo_embalagem, estoque ( id, quantidade, codigo_barras, tamanho:tamanhos(nome, ordem) )`)
-      .eq('descontinuado', false);
-    if (error) { console.log('Erro ao buscar produtos:', error.message); return produtos; }
-    const list = (data ?? []) as any as Produto[];
-    setProdutos(list);
-    return list;
+    // Ordenação explícita (sem .order o Postgres devolve em ordem arbitrária)
+    // + paginação: o Supabase tem teto de 1000 linhas por request — sem
+    // .range(), produtos acima disso eram cortados silenciosamente.
+    const PAGE = 1000;
+    let todos: Produto[] = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase
+        .from('produtos')
+        .select(`id, codigo_peca, sku_fornecedor, descricao, cor, foto_url, preco_venda, preco_compra, custo_frete, custo_embalagem, estoque ( id, quantidade, codigo_barras, tamanho:tamanhos(nome, ordem) )`)
+        .eq('descontinuado', false)
+        .order('descricao', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error) { console.log('Erro ao buscar produtos:', error.message); return produtos; }
+      const lote = (data ?? []) as any as Produto[];
+      todos = todos.concat(lote);
+      if (lote.length < PAGE) break;
+    }
+    setProdutos(todos);
+    return todos;
   }
 
   async function fetchDrafts() {
@@ -502,7 +517,7 @@ const nomesUnicos = Array.from(
       .filter(Boolean)
       .map((n) => n.trim())
   )
-).sort((a, b) => a.localeCompare('pt-BR'));
+).sort((a, b) => a.localeCompare(b, 'pt-BR'));
  
 setClientesExistentes(nomesUnicos);
 setNomeCliente('');

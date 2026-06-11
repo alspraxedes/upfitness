@@ -88,6 +88,8 @@ const COLOR_KEYWORDS: Array<{ keys: string[]; label: string; color: string }> = 
   { keys: ['CREME'], label: 'CREME', color: '#E9DFCF' },
   { keys: ['MANTEIGA'], label: 'MANTEIGA', color: '#F1E3B5' },
   { keys: ['NUDE'], label: 'NUDE', color: '#D6B9A8' },
+  { keys: ['BEGE FRIO'], label: 'BEGE', color: '#D6CDC0' },
+  { keys: ['BEGE'], label: 'BEGE', color: '#D9C7A7' },
 
   { keys: ['MARROM COFFEE', 'COFFEE'], label: 'COFFEE', color: '#4B2E2A' },
   { keys: ['MARROM NOBRE'], label: 'MARROM', color: '#5A3A2E' },
@@ -710,6 +712,12 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans pb-44">
+      {/* FRISO v2 — assinatura visual framboesa→violeta */}
+      <div className="flex h-[3px]" aria-hidden="true">
+        <div className="flex-1 bg-pink-600" />
+        <div className="flex-1 bg-blue-600" />
+      </div>
+
       {/* HEADER */}
       <header className="px-6 pt-10 pb-6 bg-slate-950 border-b border-slate-900 flex justify-between items-end backdrop-blur-md">
         <div>
@@ -785,7 +793,10 @@ export default function Dashboard() {
               aria-label="Scanner"
               title="Scanner"
             >
-              📷
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
+              </svg>
             </button>
           </div>
         </div>
@@ -796,7 +807,9 @@ export default function Dashboard() {
             <div className="text-center py-20 text-slate-800 font-black animate-pulse uppercase text-xs tracking-widest">Sincronizando...</div>
           ) : filtrados.length === 0 ? (
             <div className="text-center py-20 text-slate-600 font-bold uppercase text-xs tracking-widest flex flex-col items-center gap-2">
-              <span className="text-2xl">🤔</span>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-7 h-7 text-slate-700">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+              </svg>
               Nenhum item encontrado
               {(busca || tamanhosSelecionados.length > 0 || fornecedorSelecionado || esconderZerados) && (
                 <button onClick={resetarFiltros} className="text-pink-500 underline mt-2">
@@ -970,11 +983,26 @@ export default function Dashboard() {
 
               <button
                 onClick={() => setEsconderZerados(!esconderZerados)}
-                className={`w-full py-4 rounded-2xl font-black text-[10px] border-2 uppercase tracking-widest ${
+                className={`w-full py-4 rounded-2xl font-black text-[10px] border-2 uppercase tracking-widest flex items-center justify-center gap-2 ${
                   esconderZerados ? 'bg-pink-600/20 border-pink-500 text-pink-500' : 'bg-slate-950 border-slate-800 text-slate-500'
                 }`}
               >
-                {esconderZerados ? '🚫 Ocultando Zerados' : '👁️ Mostrar Tudo'}
+                {esconderZerados ? (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
+                    </svg>
+                    Ocultando Zerados
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    Mostrar Tudo
+                  </>
+                )}
               </button>
             </div>
 
@@ -1002,14 +1030,18 @@ export default function Dashboard() {
           <nav className="bg-slate-900/95 backdrop-blur-2xl border border-white/5 rounded-[2.5rem] h-20 px-6 flex items-center justify-around shadow-2xl">
             <Link href="/" className="flex flex-col items-center gap-1">
               <div className="p-2 rounded-2xl bg-pink-500/20 text-pink-500">
-                <span className="text-xl">📦</span>
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
+                </svg>
               </div>
               <span className="text-[9px] font-black text-pink-500 uppercase tracking-widest">ESTOQUE</span>
             </Link>
 
             <Link href={currentQS ? `/venda?${currentQS}` : '/venda'} onClick={() => saveReturnState()} className="flex flex-col items-center gap-1 opacity-40">
-              <div className="p-2">
-                <span className="text-xl">🛒</span>
+              <div className="p-2 text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 3h1.386c.51 0 .955.343 1.087.835l.383 1.437M7.5 14.25a3 3 0 00-3 3h15.75m-12.75-3h11.218c1.121-2.3 2.1-4.684 2.924-7.138a60.114 60.114 0 00-16.536-1.84M7.5 14.25L5.106 5.272M6 20.25a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm12.75 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />
+                </svg>
               </div>
               <span className="text-[9px] font-black text-white tracking-widest">VENDA</span>
             </Link>
@@ -1019,8 +1051,10 @@ export default function Dashboard() {
               onClick={() => saveReturnState()}
               className="flex flex-col items-center gap-1 opacity-40"
             >
-              <div className="p-2">
-                <span className="text-xl">🧾</span>
+              <div className="p-2 text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                </svg>
               </div>
               <span className="text-[9px] font-black text-white tracking-widest uppercase">Histórico</span>
             </Link>
@@ -1030,8 +1064,10 @@ export default function Dashboard() {
               onClick={() => saveReturnState()}
               className="flex flex-col items-center gap-1 opacity-40"
             >
-              <div className="p-2">
-                <span className="text-xl">📈</span>
+              <div className="p-2 text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" />
+                </svg>
               </div>
               <span className="text-[9px] font-black text-white tracking-widest uppercase">Relatórios</span>
             </Link>

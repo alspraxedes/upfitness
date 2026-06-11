@@ -5,6 +5,7 @@ import { supabase } from '../../lib/supabase';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { gerarThumb, thumbPathFromOriginal } from '../../lib/thumbUtils';
+import { playBeep } from '../../lib/sound';
 
 // --- UTILITÁRIOS ---
 function blobToFile(blob: Blob, filename: string) {
@@ -16,18 +17,6 @@ const formatCurrencyInput = (val: string | number) => {
   const num = typeof val === 'string' ? parseFloat(val) : val;
   if (isNaN(num)) return '';
   return num.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-};
-
-const playBeep = () => {
-  try {
-    const audio = new Audio('https://www.soundjay.com/buttons/beep-01a.mp3');
-    audio.volume = 0.5;
-    audio.play().catch(() => {});
-  } catch {}
-
-  if (typeof window !== 'undefined' && window.navigator && (window.navigator as any).vibrate) {
-    (window.navigator as any).vibrate(50);
-  }
 };
 
 function getDashboardQS(searchParams: ReturnType<typeof useSearchParams>) {
@@ -107,8 +96,24 @@ function CadastroPageInner() {
         return;
       }
 
-      // Gerar Código Interno
-      const novoCodigo = `UPF${new Date().getFullYear()}${Math.floor(1000 + Math.random() * 9000)}`;
+      // Gerar Código Interno (verifica unicidade no banco antes de usar;
+      // só Math.random dava ~9.000 combinações/ano → colisão era questão de tempo)
+      const gerarCodigoUnico = async (): Promise<string> => {
+        const ano = new Date().getFullYear();
+        for (let tentativa = 0; tentativa < 5; tentativa++) {
+          const candidato = `UPF${ano}${Math.floor(1000 + Math.random() * 9000)}`;
+          const { data: existente } = await supabase
+            .from('produtos')
+            .select('id')
+            .eq('codigo_peca', candidato)
+            .limit(1);
+          if (!existente || existente.length === 0) return candidato;
+        }
+        // Fallback: sufixo derivado do timestamp — colisão praticamente impossível
+        return `UPF${ano}${Date.now().toString().slice(-6)}`;
+      };
+
+      const novoCodigo = await gerarCodigoUnico();
       setFormData((prev) => ({ ...prev, codigo_peca: novoCodigo }));
 
       // Buscar Tamanhos

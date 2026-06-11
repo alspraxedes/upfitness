@@ -246,29 +246,18 @@ function HistoricoPageInner() {
   }, [vendas]);
 
   // --- CANCELAMENTO / EXCLUSÃO ---
+  // Usa o RPC cancelar_venda (transacional no banco): estorna o estoque
+  // e apaga a venda numa única transação — ou tudo acontece, ou nada.
+  // Antes: loop de SELECT+UPDATE por item no client, sem atomicidade.
   const executarAcao = async () => {
     if (!modalConfirmacao) return;
     setProcessandoAcao(true);
     const { tipo, venda } = modalConfirmacao;
     try {
-      if (tipo === 'cancelar') {
-        for (const item of venda.itens_venda) {
-          const { data: estAtual, error: errEst } = await supabase
-            .from('estoque')
-            .select('quantidade')
-            .eq('id', item.estoque_id)
-            .single();
-          if (errEst) throw errEst;
-          if (estAtual) {
-            const { error: errUp } = await supabase
-              .from('estoque')
-              .update({ quantidade: estAtual.quantidade + item.quantidade })
-              .eq('id', item.estoque_id);
-            if (errUp) throw errUp;
-          }
-        }
-      }
-      const { error } = await supabase.from('vendas').delete().eq('id', venda.id);
+      const { error } = await supabase.rpc('cancelar_venda', {
+        p_venda_id: venda.id,
+        p_estornar_estoque: tipo === 'cancelar',
+      });
       if (error) throw error;
       setModalConfirmacao(null);
       await fetchVendas();

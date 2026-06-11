@@ -1,20 +1,71 @@
 @import "tailwindcss";
 
+/* ============================================================
+   UPFITNESS v2 — "Ateliê Esportivo"
+   Remap de tokens do Tailwind v4: as classes usadas no código
+   (bg-slate-950, from-pink-600, to-blue-600 etc.) continuam as
+   mesmas — só o SIGNIFICADO delas muda aqui.
+   Rollback do tema inteiro = reverter este arquivo.
+
+   NÃO remapeados (semânticos, continuam padrão Tailwind):
+   - emerald/green (dinheiro, estoque OK)
+   - red (zerado, erros)
+   - orange/amber (modo edição de rascunho)
+   ============================================================ */
+
+@theme {
+  /* Tipografia — Saira (carregada via next/font no layout.tsx) */
+  --font-sans: var(--font-saira), ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', Roboto, sans-serif;
+
+  /* Base "grafite-vinho": neutros com subtom violeta no lugar
+     do slate azulado padrão */
+  --color-slate-950: #14101a;
+  --color-slate-900: #1c1626;
+  --color-slate-800: #2c2338;
+  --color-slate-700: #3e3350;
+  --color-slate-600: #574a6b;
+  --color-slate-500: #786c8c;
+  --color-slate-400: #978ca8;
+  --color-slate-300: #bbb1c9;
+  --color-slate-200: #d9d2e3;
+  --color-slate-100: #f2eef7;
+  --color-slate-50: #faf8fc;
+
+  /* Accent primário: framboesa (substitui o pink elétrico) */
+  --color-pink-200: #f8c2d6;
+  --color-pink-400: #ef6fa0;
+  --color-pink-500: #ea528d;
+  --color-pink-600: #e5407e;
+  --color-pink-700: #c42e68;
+  --color-pink-900: #771b41;
+  --color-pink-950: #4a0f27;
+
+  /* Accent secundário: violeta (substitui o azul — os gradientes
+     from-pink-600 to-blue-600 viram framboesa→violeta) */
+  --color-blue-400: #b295fa;
+  --color-blue-500: #9d74f8;
+  --color-blue-600: #8b5cf6;
+  --color-blue-700: #7644e3;
+  --color-blue-900: #432376;
+  --color-blue-950: #2b1452;
+}
+
 body {
-  background-color: #0f172a; /* Slate 950 */
-  color: #f1f5f9;            /* Slate 100 */
+  background-color: #14101a; /* slate-950 v2 */
+  color: #f2eef7;            /* slate-100 v2 */
 }
 
 /* Ajuste para o scanner de QR Code não ficar estranho no fundo escuro */
 #reader {
   border: none !important;
-  background: #1e293b;
+  background: #1c1626;
   border-radius: 12px;
   overflow: hidden;
 }
 
 #reader__dashboard_section_csr button {
-  background-color: #ec4899 !important; /* Pink 500 */
+  background-color: #e5407e !important; /* framboesa v2 */
   color: white !important;
   border: none !important;
   padding: 8px 16px !important;
@@ -29,5 +80,5 @@ input::-webkit-inner-spin-button {
 }
 
 input[type=number] {
-    -moz-appearance: textfield;
-  }
+  -moz-appearance: textfield;
+}
