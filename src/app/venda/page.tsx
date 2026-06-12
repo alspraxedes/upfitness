@@ -92,6 +92,69 @@ type PedidoCatalogoItem = {
 // --- UTILITÁRIOS ---
 const formatBRL = (val: number) => val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
+// --- CREDIÁRIO ---
+type FrequenciaCrediario = 'semanal' | 'quinzenal' | 'mensal';
+
+type ParcelaCrediario = {
+  numero: number;
+  valor: number; // em reais, 2 casas
+  valorStr: string; // valor como digitado (aceita vírgula)
+  data_vencimento: string; // YYYY-MM-DD
+};
+
+// Converte texto digitado (vírgula ou ponto) em número
+const parseValorDigitado = (s: string) => {
+  const v = parseFloat(s.replace(',', '.'));
+  return isNaN(v) ? 0 : v;
+};
+
+const valorParaStr = (v: number) => v.toFixed(2).replace('.', ',');
+
+const FREQ_LABEL: Record<FrequenciaCrediario, string> = {
+  semanal: 'Semanal',
+  quinzenal: 'Quinzenal',
+  mensal: 'Mensal',
+};
+
+function hojeISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Soma i ciclos da frequência à data base (ISO local, sem timezone).
+// Mensal com clamp de fim de mês: 1ª parcela dia 31 → fevereiro cai no 28/29.
+function addCiclos(baseISO: string, freq: FrequenciaCrediario, i: number): string {
+  const [y, m, d] = baseISO.split('-').map(Number);
+  if (freq === 'mensal') {
+    const totalM = (m - 1) + i;
+    const ano = y + Math.floor(totalM / 12);
+    const mes = (totalM % 12) + 1;
+    const ultimoDia = new Date(ano, mes, 0).getDate();
+    return `${ano}-${String(mes).padStart(2, '0')}-${String(Math.min(d, ultimoDia)).padStart(2, '0')}`;
+  }
+  const dt = new Date(y, m - 1, d + (freq === 'semanal' ? 7 : 14) * i);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
+// Divide o valor em n parcelas iguais usando centavos inteiros (sem float);
+// a última parcela absorve a diferença de arredondamento.
+function gerarParcelasCrediario(valorFinal: number, n: number, primeiraISO: string, freq: FrequenciaCrediario): ParcelaCrediario[] {
+  const totalCents = Math.round(valorFinal * 100);
+  if (n < 1 || totalCents <= 0 || !primeiraISO) return [];
+  const base = Math.floor(totalCents / n);
+  const out: ParcelaCrediario[] = [];
+  for (let i = 0; i < n; i++) {
+    const cents = i === n - 1 ? totalCents - base * (n - 1) : base;
+    out.push({ numero: i + 1, valor: cents / 100, valorStr: valorParaStr(cents / 100), data_vencimento: addCiclos(primeiraISO, freq, i) });
+  }
+  return out;
+}
+
+const formatDataCurta = (iso: string) => {
+  const [y, m, d] = iso.split('-');
+  return `${d}/${m}/${y.slice(2)}`;
+};
+
 const ordenarEstoque = (estoque: EstoqueItem[]) => {
   return [...estoque].sort((a, b) => (a.tamanho?.ordem ?? 999) - (b.tamanho?.ordem ?? 999));
 };
@@ -178,6 +241,15 @@ function VendaPageInner() {
     descontoTipo: 'reais' as 'reais' | 'porcentagem',
     descontoValor: 0,
     valorFinal: 0,
+  });
+
+  // Crediário: parâmetros + parcelas geradas (valores editáveis)
+  const [crediario, setCrediario] = useState({
+    frequencia: 'quinzenal' as FrequenciaCrediario,
+    numParcelas: 4,
+    primeiraData: hojeISO(),
+    baixarPrimeira: false,
+    parcelas: [] as ParcelaCrediario[],
   });
 
   const [imgSrc, setImgSrc] = useState<string | null>(null);
@@ -274,6 +346,18 @@ function VendaPageInner() {
     else final = totalBrutoCalc - totalBrutoCalc * (pagamento.descontoValor / 100);
     setPagamento((prev) => ({ ...prev, valorFinal: Math.max(0, final) }));
   }, [carrinho, pagamento.descontoTipo, pagamento.descontoValor]);
+
+  // Crediário: regera as parcelas quando os parâmetros mudam (valor final,
+  // nº de parcelas, 1ª data ou frequência). Edições manuais de valor
+  // persistem até o próximo ajuste de parâmetro ou clique em Redistribuir.
+  useEffect(() => {
+    if (pagamento.metodo !== 'crediario') return;
+    setCrediario((prev) => ({
+      ...prev,
+      parcelas: gerarParcelasCrediario(pagamento.valorFinal, prev.numParcelas, prev.primeiraData, prev.frequencia),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pagamento.metodo, pagamento.valorFinal, crediario.numParcelas, crediario.primeiraData, crediario.frequencia]);
 
   useEffect(() => {
     if (mostrarScanner) {
@@ -493,6 +577,29 @@ function VendaPageInner() {
     return clientesExistentes.filter((n) => n.toLowerCase().includes(q));
   }, [nomeCliente, clientesExistentes]);
 
+  // Crediário: validação em centavos inteiros (sem dust de float)
+  const totalCentsCrediario = Math.round(pagamento.valorFinal * 100);
+  const somaCentsCrediario = crediario.parcelas.reduce((acc, p) => acc + Math.round(p.valor * 100), 0);
+  const crediarioSomaOk = crediario.parcelas.length > 0 && somaCentsCrediario === totalCentsCrediario;
+  const crediarioParcelasValidas = crediario.parcelas.length > 0 && crediario.parcelas.every((p) => Math.round(p.valor * 100) > 0);
+  const crediarioClienteOk = nomeCliente.trim().length > 0;
+  const crediarioPronto = crediarioSomaOk && crediarioParcelasValidas && crediarioClienteOk;
+
+  // Joga o que falta (valor final − soma das demais) na última parcela
+  function restoNaUltima() {
+    setCrediario((prev) => {
+      if (prev.parcelas.length === 0) return prev;
+      const somaOutras = prev.parcelas.slice(0, -1).reduce((a, p) => a + Math.round(p.valor * 100), 0);
+      const resto = Math.max(0, totalCentsCrediario - somaOutras);
+      return {
+        ...prev,
+        parcelas: prev.parcelas.map((p, i) =>
+          i === prev.parcelas.length - 1 ? { ...p, valor: resto / 100, valorStr: valorParaStr(resto / 100) } : p
+        ),
+      };
+    });
+  }
+
   function bloquearFechamentoSeZerados() {
     if (!temZerados) return false;
     const lista = itensZerados.slice(0, 6).map((i) => `• ${i.descricao} (${i.cor} • ${i.tamanho})`).join('\n');
@@ -504,6 +611,7 @@ function VendaPageInner() {
     if (carrinho.length === 0) return alert('Carrinho vazio.');
     if (bloquearFechamentoSeZerados()) return;
     setPagamento({ metodo: 'pix', parcelas: 1, descontoTipo: 'reais', descontoValor: 0, valorFinal: totalBruto });
+    setCrediario({ frequencia: 'quinzenal', numParcelas: 4, primeiraData: hojeISO(), baixarPrimeira: false, parcelas: [] });
     const { data: clientesData } = await supabase
   .from('vendas')
   .select('nome_cliente')
@@ -632,6 +740,11 @@ setMostrarSugestoes(false);
 
   async function confirmarVenda() {
     if (bloquearFechamentoSeZerados()) return;
+    if (pagamento.metodo === 'crediario') {
+      if (!crediarioClienteOk) { alert('Crediário exige o nome da cliente.'); return; }
+      if (!crediarioParcelasValidas) { alert('Todas as parcelas precisam ter valor maior que zero.'); return; }
+      if (!crediarioSomaOk) { alert(`A soma das parcelas (${formatBRL(somaCentsCrediario / 100)}) precisa ser igual ao valor final (${formatBRL(totalCentsCrediario / 100)}).`); return; }
+    }
     setLoading(true);
     const itensPayload = carrinho.map((i) => ({
       produto_id: i.produto_id,
@@ -642,16 +755,40 @@ setMostrarSugestoes(false);
       preco_unitario: i.preco,
       subtotal: i.preco * i.qtd,
     }));
-   
-    const { error } = await supabase.rpc('realizar_venda', {
-      p_valor_bruto: totalBruto,
-      p_valor_liquido: pagamento.valorFinal,
-      p_desconto: totalBruto - pagamento.valorFinal,
-      p_forma_pagamento: pagamento.metodo,
-      p_parcelas: pagamento.metodo === 'credito' ? pagamento.parcelas : 1,
-      p_itens: itensPayload,
-      p_nome_cliente: nomeCliente.trim() || null,  // NOVO
-    });
+
+    // Parcelas do crediário (a 1ª já sai paga se a checkbox estiver marcada)
+    const parcelasCrediarioPayload = pagamento.metodo === 'crediario'
+      ? crediario.parcelas.map((p, idx) => ({
+          numero: p.numero,
+          valor: Math.round(p.valor * 100) / 100,
+          data_vencimento: p.data_vencimento,
+          pago: idx === 0 && crediario.baixarPrimeira,
+        }))
+      : null;
+
+    let error;
+    if (pagamento.metodo === 'crediario') {
+      // RPC transacional própria: venda + itens + baixa de estoque + parcelas
+      ({ error } = await supabase.rpc('realizar_venda_crediario', {
+        p_valor_bruto: totalBruto,
+        p_valor_liquido: pagamento.valorFinal,
+        p_desconto: totalBruto - pagamento.valorFinal,
+        p_itens: itensPayload,
+        p_nome_cliente: nomeCliente.trim(),
+        p_frequencia: crediario.frequencia,
+        p_parcelas_crediario: parcelasCrediarioPayload,
+      }));
+    } else {
+      ({ error } = await supabase.rpc('realizar_venda', {
+        p_valor_bruto: totalBruto,
+        p_valor_liquido: pagamento.valorFinal,
+        p_desconto: totalBruto - pagamento.valorFinal,
+        p_forma_pagamento: pagamento.metodo,
+        p_parcelas: pagamento.metodo === 'credito' ? pagamento.parcelas : 1,
+        p_itens: itensPayload,
+        p_nome_cliente: nomeCliente.trim() || null,  // NOVO
+      }));
+    }
     setLoading(false);
     if (error) { alert('Erro: ' + error.message); return; }
     if (draftAtualId) { await supabase.from('venda_drafts').delete().eq('id', draftAtualId); setDraftAtualId(null); setDraftAtualTitulo(''); await fetchDrafts(); }
@@ -666,7 +803,10 @@ setMostrarSugestoes(false);
       subtotal: totalBruto,
       desconto: totalBruto - pagamento.valorFinal,
       totalFinal: pagamento.valorFinal,
-      metodoPagamento: pagamento.metodo,
+      metodoPagamento: pagamento.metodo === 'crediario' ? 'Crediário' : pagamento.metodo,
+      crediario: pagamento.metodo === 'crediario' && parcelasCrediarioPayload
+        ? { frequencia: crediario.frequencia, parcelas: parcelasCrediarioPayload }
+        : undefined,
       data: new Date(),
       cliente: nomeCliente.trim() || undefined,  // NOVO
     });
@@ -1111,13 +1251,17 @@ setMostrarSugestoes(false);
             <div className="space-y-2 relative">
     <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">
       Nome da Cliente{' '}
-      <span className="text-slate-600 normal-case font-normal">(opcional)</span>
+      {pagamento.metodo === 'crediario' ? (
+        <span className="text-violet-400 normal-case font-bold">(obrigatório no crediário)</span>
+      ) : (
+        <span className="text-slate-600 normal-case font-normal">(opcional)</span>
+      )}
     </label>
     <input
       type="text"
       placeholder="Ex: Paty Maionese"
       autoComplete="off"
-      className="w-full bg-slate-950 border-2 border-slate-800 focus:border-pink-500 outline-none p-4 rounded-2xl text-white font-bold text-base placeholder:text-slate-600 h-16"
+      className={`w-full bg-slate-950 border-2 focus:border-pink-500 outline-none p-4 rounded-2xl text-white font-bold text-base placeholder:text-slate-600 h-16 ${pagamento.metodo === 'crediario' && !crediarioClienteOk ? 'border-red-900/70' : 'border-slate-800'}`}
       value={nomeCliente}
       onChange={(e) => {
         setNomeCliente(e.target.value);
@@ -1181,9 +1325,9 @@ setMostrarSugestoes(false);
               <div className="space-y-4">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Forma de Pagamento</label>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {['pix', 'dinheiro', 'debito', 'credito'].map((m) => (
-                    <button key={m} onClick={() => setPagamento((prev) => ({ ...prev, metodo: m }))} className={`py-5 rounded-xl font-bold uppercase text-xs tracking-widest transition-all border-2 ${pagamento.metodo === m ? 'bg-emerald-600 border-emerald-500 text-white shadow-lg scale-105' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600'}`}>
-                      {m === 'credito' ? 'Crédito' : m === 'debito' ? 'Débito' : m}
+                  {['pix', 'dinheiro', 'debito', 'credito', 'crediario'].map((m) => (
+                    <button key={m} onClick={() => setPagamento((prev) => ({ ...prev, metodo: m }))} className={`py-5 rounded-xl font-bold uppercase text-xs tracking-widest transition-all border-2 ${m === 'crediario' ? 'col-span-2 md:col-span-4' : ''} ${pagamento.metodo === m ? (m === 'crediario' ? 'bg-violet-600 border-violet-500 text-white shadow-lg scale-[1.02]' : 'bg-emerald-600 border-emerald-500 text-white shadow-lg scale-105') : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600'}`}>
+                      {m === 'credito' ? 'Crédito' : m === 'debito' ? 'Débito' : m === 'crediario' ? 'Crediário' : m}
                     </button>
                   ))}
                 </div>
@@ -1196,9 +1340,93 @@ setMostrarSugestoes(false);
                   </select>
                 </div>
               )}
+              {pagamento.metodo === 'crediario' && (
+                <div className="space-y-4 animate-in fade-in slide-in-from-top-4">
+                  <label className="text-xs font-bold text-violet-400 uppercase tracking-widest">Crediário</label>
+
+                  {/* Frequência */}
+                  <div className="grid grid-cols-3 gap-3">
+                    {(['semanal', 'quinzenal', 'mensal'] as FrequenciaCrediario[]).map((fq) => (
+                      <button key={fq} onClick={() => setCrediario((prev) => ({ ...prev, frequencia: fq }))} className={`py-4 rounded-xl font-bold uppercase text-[10px] tracking-widest transition-all border-2 ${crediario.frequencia === fq ? 'bg-violet-600 border-violet-500 text-white shadow' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600'}`}>
+                        {FREQ_LABEL[fq]}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Nº de parcelas + data da 1ª parcela */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Parcelas</label>
+                      <select className="w-full bg-slate-950 border-2 border-slate-800 p-4 rounded-xl text-white font-bold outline-none focus:border-violet-500 h-16 text-lg" value={crediario.numParcelas} onChange={(e) => setCrediario((prev) => ({ ...prev, numParcelas: parseInt(e.target.value) }))}>
+                        {Array.from({ length: 24 }, (_, i) => i + 1).map((p) => <option key={p} value={p}>{p}x</option>)}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">1ª parcela</label>
+                      <input type="date" className="w-full bg-slate-950 border-2 border-slate-800 p-4 rounded-xl text-white font-bold outline-none focus:border-violet-500 h-16" value={crediario.primeiraData} onChange={(e) => { if (e.target.value) setCrediario((prev) => ({ ...prev, primeiraData: e.target.value })); }} />
+                    </div>
+                  </div>
+
+                  {/* Baixa imediata da 1ª parcela */}
+                  <label className="flex items-center gap-3 bg-slate-950 border-2 border-slate-800 rounded-xl p-4 cursor-pointer hover:border-slate-600 transition-colors">
+                    <input type="checkbox" checked={crediario.baixarPrimeira} onChange={(e) => setCrediario((prev) => ({ ...prev, baixarPrimeira: e.target.checked }))} className="w-5 h-5 accent-violet-500 shrink-0" />
+                    <span className="text-xs font-bold text-slate-300 uppercase tracking-widest">Dar baixa na 1ª parcela agora (paga no ato)</span>
+                  </label>
+
+                  {/* Parcelas: datas geradas + valores editáveis */}
+                  <div className="bg-slate-950 border-2 border-slate-800 rounded-xl overflow-hidden">
+                    <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Parcelas — valores editáveis</span>
+                      <button onClick={() => setCrediario((prev) => ({ ...prev, parcelas: gerarParcelasCrediario(pagamento.valorFinal, prev.numParcelas, prev.primeiraData, prev.frequencia) }))} className="text-[10px] font-black uppercase tracking-widest text-violet-400 hover:text-violet-300 active:scale-95">↺ Redistribuir</button>
+                    </div>
+                    <div className="max-h-56 overflow-y-auto divide-y divide-slate-800/60">
+                      {crediario.parcelas.map((p, idx) => (
+                        <div key={p.numero} className="flex items-center gap-3 px-4 py-2">
+                          <span className="w-8 text-[11px] font-black text-slate-400 shrink-0">{p.numero}ª</span>
+                          <span className="flex-1 text-[11px] font-mono text-slate-300 truncate">{formatDataCurta(p.data_vencimento)}</span>
+                          {idx === 0 && crediario.baixarPrimeira && (
+                            <span className="text-[9px] font-black uppercase text-emerald-400 bg-emerald-900/20 border border-emerald-900/30 px-2 py-0.5 rounded-lg shrink-0">paga no ato</span>
+                          )}
+                          <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-lg px-2 shrink-0">
+                            <span className="text-[10px] text-slate-500 font-bold">R$</span>
+                            <input
+                              type="text" inputMode="decimal" autoComplete="off"
+                              className="bg-transparent w-20 py-2 text-sm font-bold text-white outline-none text-right"
+                              value={p.valorStr}
+                              onChange={(e) => {
+                                const raw = e.target.value.replace(/[^0-9.,]/g, '');
+                                setCrediario((prev) => ({
+                                  ...prev,
+                                  parcelas: prev.parcelas.map((pp) => pp.numero === p.numero ? { ...pp, valorStr: raw, valor: parseValorDigitado(raw) } : pp),
+                                }));
+                              }}
+                            />
+                          </div>
+                          {idx === crediario.parcelas.length - 1 && crediario.parcelas.length > 1 && (
+                            <button onClick={restoNaUltima} title="Colocar o valor restante nesta parcela" className="shrink-0 text-[9px] font-black uppercase tracking-widest text-violet-300 bg-violet-950/40 border border-violet-900/50 hover:bg-violet-900/40 px-2 py-1.5 rounded-lg active:scale-95">
+                              resto
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    {/* Validação da soma em tempo real */}
+                    <div className={`px-4 py-3 border-t flex items-center justify-between ${crediarioSomaOk ? 'border-emerald-900/40 bg-emerald-950/20' : 'border-red-900/40 bg-red-950/20'}`}>
+                      <span className={`text-[10px] font-black uppercase tracking-widest ${crediarioSomaOk ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {crediarioSomaOk ? '✓ Soma confere' : `Diferença: ${formatBRL((somaCentsCrediario - totalCentsCrediario) / 100)}`}
+                      </span>
+                      <span className="text-xs font-black text-white">{formatBRL(somaCentsCrediario / 100)} / {formatBRL(totalCentsCrediario / 100)}</span>
+                    </div>
+                  </div>
+
+                  {!crediarioClienteOk && (
+                    <p className="text-[10px] font-black uppercase tracking-widest text-red-400">⚠ Informe o nome da cliente — obrigatório no crediário</p>
+                  )}
+                </div>
+              )}
             </div>
             <div className="p-6 bg-slate-950 border-t border-slate-800 shrink-0">
-              <button onClick={confirmarVenda} disabled={loading} className="w-full bg-gradient-to-r from-pink-600 to-pink-500 text-white font-black py-5 rounded-2xl shadow-xl uppercase tracking-widest text-sm hover:brightness-110 transition-all disabled:opacity-50 h-16 active:scale-95">{loading ? 'REGISTRANDO...' : 'CONFIRMAR PAGAMENTO'}</button>
+              <button onClick={confirmarVenda} disabled={loading || (pagamento.metodo === 'crediario' && !crediarioPronto)} className="w-full bg-gradient-to-r from-pink-600 to-pink-500 text-white font-black py-5 rounded-2xl shadow-xl uppercase tracking-widest text-sm hover:brightness-110 transition-all disabled:opacity-50 h-16 active:scale-95">{loading ? 'REGISTRANDO...' : 'CONFIRMAR PAGAMENTO'}</button>
             </div>
           </div>
         </div>

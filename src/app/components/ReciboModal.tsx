@@ -10,6 +10,13 @@ interface ItemVenda {
   cor?: string; // NOVO
 }
 
+interface ParcelaCrediarioRecibo {
+  numero: number;
+  valor: number;
+  data_vencimento: string; // YYYY-MM-DD
+  pago?: boolean;
+}
+
 interface ReciboProps {
   visivel: boolean;
   onClose: () => void;
@@ -19,6 +26,10 @@ interface ReciboProps {
     desconto: number;
     totalFinal: number;
     metodoPagamento: string;
+    crediario?: {
+      frequencia: string;
+      parcelas: ParcelaCrediarioRecibo[];
+    };
     data: Date;
     cliente?: string;
   } | null;
@@ -31,6 +42,11 @@ export default function ReciboModal({ visivel, onClose, dados }: ReciboProps) {
 
   const f = (n: number) =>
     new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(n);
+
+  const fd = (iso: string) => {
+    const [y, m, d] = iso.split('-');
+    return `${d}/${m}/${y.slice(2)}`;
+  };
 
   const handlePrint = () => {
     const conteudo = printRef.current?.innerHTML;
@@ -78,6 +94,12 @@ export default function ReciboModal({ visivel, onClose, dados }: ReciboProps) {
     if (dados.desconto > 0) linhas.push(`Desconto: - ${f(dados.desconto)}`);
     linhas.push(`*TOTAL: ${f(dados.totalFinal)}*`);
     linhas.push(`Pagamento: ${dados.metodoPagamento}`);
+    if (dados.crediario) {
+      linhas.push(`Parcelamento: ${dados.crediario.parcelas.length}x (${dados.crediario.frequencia})`);
+      dados.crediario.parcelas.forEach((p) => {
+        linhas.push(`${p.numero}ª — ${fd(p.data_vencimento)}: ${f(p.valor)}${p.pago ? ' (paga)' : ''}`);
+      });
+    }
     linhas.push(`Data: ${dados.data.toLocaleString('pt-BR')}`);
 
     const texto = linhas.join('\n');
@@ -146,6 +168,23 @@ export default function ReciboModal({ visivel, onClose, dados }: ReciboProps) {
               Pagamento: {dados.metodoPagamento}
             </div>
           </div>
+
+          {dados.crediario && (
+            <div className="mt-4 text-left text-[11px] text-gray-700">
+              <div className="border-b-2 border-dashed border-gray-300 mb-3"></div>
+              <div className="font-bold uppercase text-xs mb-2">
+                Crediário — {dados.crediario.parcelas.length}x ({dados.crediario.frequencia})
+              </div>
+              <div className="space-y-1">
+                {dados.crediario.parcelas.map((p) => (
+                  <div key={p.numero} className="flex justify-between">
+                    <span>{p.numero}ª — {fd(p.data_vencimento)}</span>
+                    <span className="font-bold">{f(p.valor)}{p.pago ? ' ✓ paga' : ''}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="mt-8 text-center text-[10px] text-gray-400">
             <p>Obrigado pela preferência!</p>

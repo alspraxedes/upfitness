@@ -22,6 +22,15 @@ type ItemVenda = {
   };
 };
 
+type ParcelaCred = {
+  id: string;
+  numero: number;
+  valor: number;
+  data_vencimento: string; // YYYY-MM-DD
+  pago: boolean;
+  data_pagamento: string | null;
+};
+
 type Venda = {
   id: string;
   codigo_venda: number;
@@ -31,8 +40,74 @@ type Venda = {
   forma_pagamento: string;
   desconto: number;
   parcelas: number;
+  crediario_frequencia: string | null;
   nome_cliente: string | null;
   itens_venda: ItemVenda[];
+  crediario_parcelas: ParcelaCred[];
+};
+
+// --- CREDIÁRIO (helpers duplicados da tela de venda; unificar na Fase 3) ---
+type FrequenciaCrediario = 'semanal' | 'quinzenal' | 'mensal';
+
+type ParcelaConv = {
+  numero: number;
+  valor: number;
+  valorStr: string; // valor como digitado (aceita vírgula)
+  data_vencimento: string;
+  pago: boolean;
+};
+
+// Converte texto digitado (vírgula ou ponto) em número
+const parseValorDigitado = (s: string) => {
+  const v = parseFloat(s.replace(',', '.'));
+  return isNaN(v) ? 0 : v;
+};
+
+const valorParaStr = (v: number) => v.toFixed(2).replace('.', ',');
+
+const FREQ_LABEL: Record<FrequenciaCrediario, string> = {
+  semanal: 'Semanal',
+  quinzenal: 'Quinzenal',
+  mensal: 'Mensal',
+};
+
+function hojeISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Soma i ciclos da frequência à data base (ISO local). Mensal com clamp
+// de fim de mês: 1ª parcela dia 31 → fevereiro cai no 28/29.
+function addCiclos(baseISO: string, freq: FrequenciaCrediario, i: number): string {
+  const [y, m, d] = baseISO.split('-').map(Number);
+  if (freq === 'mensal') {
+    const totalM = (m - 1) + i;
+    const ano = y + Math.floor(totalM / 12);
+    const mes = (totalM % 12) + 1;
+    const ultimoDia = new Date(ano, mes, 0).getDate();
+    return `${ano}-${String(mes).padStart(2, '0')}-${String(Math.min(d, ultimoDia)).padStart(2, '0')}`;
+  }
+  const dt = new Date(y, m - 1, d + (freq === 'semanal' ? 7 : 14) * i);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
+// Divide o valor em n parcelas iguais (centavos inteiros);
+// a última absorve a diferença de arredondamento.
+function gerarParcelasConv(valorFinal: number, n: number, primeiraISO: string, freq: FrequenciaCrediario): ParcelaConv[] {
+  const totalCents = Math.round(valorFinal * 100);
+  if (n < 1 || totalCents <= 0 || !primeiraISO) return [];
+  const base = Math.floor(totalCents / n);
+  const out: ParcelaConv[] = [];
+  for (let i = 0; i < n; i++) {
+    const cents = i === n - 1 ? totalCents - base * (n - 1) : base;
+    out.push({ numero: i + 1, valor: cents / 100, valorStr: valorParaStr(cents / 100), data_vencimento: addCiclos(primeiraISO, freq, i), pago: false });
+  }
+  return out;
+}
+
+const formatDataCurta = (iso: string) => {
+  const [y, m, d] = iso.split('-');
+  return `${d}/${m}/${y.slice(2)}`;
 };
 
 // --- UTILITÁRIOS ---
@@ -82,6 +157,100 @@ function HistoricoPageInner() {
   // Exclusão/Cancelamento
   const [modalConfirmacao, setModalConfirmacao] = useState<{ tipo: 'apagar' | 'cancelar'; venda: Venda } | null>(null);
   const [processandoAcao, setProcessandoAcao] = useState(false);
+
+  // Conversão para crediário
+  const [modalConversao, setModalConversao] = useState<Venda | null>(null);
+  const [conv, setConv] = useState({
+    frequencia: 'quinzenal' as FrequenciaCrediario,
+    numParcelas: 4,
+    primeiraData: hojeISO(),
+    parcelas: [] as ParcelaConv[],
+  });
+  const [convertendo, setConvertendo] = useState(false);
+
+  function abrirConversao(venda: Venda) {
+    if (!venda.nome_cliente?.trim()) {
+      alert('Adicione o nome da cliente antes de converter para crediário (use o ✏️ Editar no bloco Cliente). Sem cliente não há como cobrar os recebíveis.');
+      return;
+    }
+    setConv({
+      frequencia: 'quinzenal',
+      numParcelas: 4,
+      primeiraData: hojeISO(),
+      parcelas: gerarParcelasConv(venda.valor_liquido || 0, 4, hojeISO(), 'quinzenal'),
+    });
+    setModalConversao(venda);
+  }
+
+  // Regera as parcelas da conversão quando os parâmetros mudam.
+  // Edições manuais (valor/paga) persistem até o próximo ajuste de parâmetro.
+  useEffect(() => {
+    if (!modalConversao) return;
+    setConv((prev) => ({
+      ...prev,
+      parcelas: gerarParcelasConv(modalConversao.valor_liquido || 0, prev.numParcelas, prev.primeiraData, prev.frequencia),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalConversao, conv.numParcelas, conv.primeiraData, conv.frequencia]);
+
+  // Validação em centavos inteiros
+  const convTotalCents = modalConversao ? Math.round((modalConversao.valor_liquido || 0) * 100) : 0;
+  const convSomaCents = conv.parcelas.reduce((a, p) => a + Math.round(p.valor * 100), 0);
+  const convSomaOk = conv.parcelas.length > 0 && convSomaCents === convTotalCents;
+  const convValoresOk = conv.parcelas.length > 0 && conv.parcelas.every((p) => Math.round(p.valor * 100) > 0);
+
+  // Joga o que falta (total − soma das demais) na última parcela
+  function restoNaUltimaConv() {
+    setConv((prev) => {
+      if (prev.parcelas.length === 0) return prev;
+      const somaOutras = prev.parcelas.slice(0, -1).reduce((a, p) => a + Math.round(p.valor * 100), 0);
+      const resto = Math.max(0, convTotalCents - somaOutras);
+      return {
+        ...prev,
+        parcelas: prev.parcelas.map((p, i) =>
+          i === prev.parcelas.length - 1 ? { ...p, valor: resto / 100, valorStr: valorParaStr(resto / 100) } : p
+        ),
+      };
+    });
+  }
+
+  async function confirmarConversao() {
+    if (!modalConversao) return;
+    if (!convValoresOk) { alert('Todas as parcelas precisam ter valor maior que zero.'); return; }
+    if (!convSomaOk) { alert(`A soma das parcelas (${formatBRL(convSomaCents / 100)}) precisa ser igual ao valor da venda (${formatBRL(convTotalCents / 100)}).`); return; }
+    setConvertendo(true);
+    try {
+      const payload = conv.parcelas.map((p) => ({
+        numero: p.numero,
+        valor: Math.round(p.valor * 100) / 100,
+        data_vencimento: p.data_vencimento,
+        pago: p.pago,
+      }));
+      const { error } = await supabase.rpc('converter_venda_crediario', {
+        p_venda_id: modalConversao.id,
+        p_frequencia: conv.frequencia,
+        p_parcelas: payload,
+      });
+      if (error) throw new Error(error.message);
+      setModalConversao(null);
+      await fetchVendas();
+    } catch (err: any) {
+      alert('Erro ao converter: ' + (err?.message || String(err)));
+    } finally {
+      setConvertendo(false);
+    }
+  }
+
+  // Pré-filtra a tela de Recebíveis pelo cliente (mesma chave de localStorage)
+  function preFiltrarRecebiveis(nomeCliente: string | null) {
+    try {
+      localStorage.setItem('upfitness_recebiveis_filtros_v1', JSON.stringify({
+        filtroStatus: 'pendentes',
+        agrupamento: 'data',
+        filtroCliente: nomeCliente?.trim() ?? '',
+      }));
+    } catch { /* ignore */ }
+  }
 
   // Edição inline de cliente
   const [editandoClienteId, setEditandoClienteId] = useState<string | null>(null);
@@ -134,7 +303,8 @@ function HistoricoPageInner() {
           estoque (
             produto:produtos ( preco_compra, custo_frete, custo_embalagem )
           )
-        )
+        ),
+        crediario_parcelas ( id, numero, valor, data_vencimento, pago, data_pagamento )
       `)
       .order('created_at', { ascending: false });
 
@@ -302,6 +472,12 @@ function HistoricoPageInner() {
     }
     linhas.push(`*TOTAL: ${f(v.valor_liquido)}*`);
     linhas.push(`Pagamento: ${v.forma_pagamento}${v.parcelas > 1 ? ` (${v.parcelas}x)` : ''}`);
+    if (v.forma_pagamento === 'crediario' && (v.crediario_parcelas?.length ?? 0) > 0) {
+      if (v.crediario_frequencia) linhas.push(`Frequência: ${v.crediario_frequencia}`);
+      [...v.crediario_parcelas].sort((a, b) => a.numero - b.numero).forEach((p) => {
+        linhas.push(`${p.numero}ª — ${formatDataCurta(p.data_vencimento)}: ${f(Number(p.valor) || 0)}${p.pago ? ' (paga)' : ''}`);
+      });
+    }
     linhas.push(`Data: ${formatData(v.created_at)}`);
 
     const texto = linhas.join('\n');
@@ -436,11 +612,18 @@ function HistoricoPageInner() {
                               ? 'bg-emerald-400'
                               : venda.forma_pagamento === 'credito'
                               ? 'bg-blue-400'
+                              : venda.forma_pagamento === 'crediario'
+                              ? 'bg-violet-400'
                               : 'bg-yellow-400'
                           }`}
                         >
                           {venda.forma_pagamento}
                         </span>
+                        {venda.forma_pagamento === 'crediario' && (venda.crediario_parcelas?.length ?? 0) > 0 && (
+                          <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded border ${venda.crediario_parcelas.every((p) => p.pago) ? 'text-emerald-400 border-emerald-900/50 bg-emerald-950/30' : 'text-violet-300 border-violet-900/50 bg-violet-950/30'}`}>
+                            {venda.crediario_parcelas.filter((p) => p.pago).length}/{venda.crediario_parcelas.length} pagas
+                          </span>
+                        )}
                         {!isExpanded && (
                           <span className="text-[10px] text-slate-500 font-bold uppercase">
                             {venda.itens_venda.length} itens
@@ -589,6 +772,38 @@ function HistoricoPageInner() {
                         ))}
                       </div>
 
+                      {/* PARCELAS DO CREDIÁRIO */}
+                      {venda.forma_pagamento === 'crediario' && (venda.crediario_parcelas?.length ?? 0) > 0 && (
+                        <div className="bg-slate-900/60 border border-violet-900/40 rounded-2xl p-3 space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[10px] text-violet-400 font-black uppercase tracking-widest">
+                              Crediário — {venda.crediario_parcelas.filter((p) => p.pago).length}/{venda.crediario_parcelas.length} pagas
+                              {venda.crediario_frequencia ? ` • ${venda.crediario_frequencia}` : ''}
+                            </p>
+                            <Link
+                              href={`/recebiveis${dashQS}`}
+                              onClick={() => preFiltrarRecebiveis(venda.nome_cliente)}
+                              className="shrink-0 text-[10px] font-black uppercase tracking-widest text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-xl active:scale-95 transition-colors"
+                            >
+                              Recebíveis →
+                            </Link>
+                          </div>
+                          <div className="space-y-1">
+                            {[...venda.crediario_parcelas].sort((a, b) => a.numero - b.numero).map((p) => (
+                              <div key={p.id} className="flex justify-between items-center text-xs border-b border-slate-800/50 pb-1 last:border-0 last:pb-0">
+                                <span className="text-slate-400 font-mono">
+                                  {p.numero}ª — venc. {formatDataCurta(p.data_vencimento)}
+                                  {p.pago && p.data_pagamento ? ` • paga em ${formatDataCurta(p.data_pagamento)}` : ''}
+                                </span>
+                                <span className={`font-bold ${p.pago ? 'text-emerald-400' : 'text-slate-300'}`}>
+                                  {formatBRL(Number(p.valor) || 0)}{p.pago ? ' ✓' : ''}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       {/* AÇÕES */}
                       <div className="flex flex-col gap-2 pt-2 border-t border-slate-800/50">
                         <button
@@ -597,6 +812,14 @@ function HistoricoPageInner() {
                         >
                           📄 Ver Recibo / Imprimir
                         </button>
+                        {venda.forma_pagamento !== 'crediario' && (
+                          <button
+                            onClick={() => abrirConversao(venda)}
+                            className="w-full bg-violet-950/30 hover:bg-violet-900/40 text-violet-300 border border-violet-900/50 py-3 rounded-xl font-bold uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 transition"
+                          >
+                            💳 Converter p/ Crediário
+                          </button>
+                        )}
                         <div className="flex gap-2">
                           <button
                             onClick={() => setModalConfirmacao({ tipo: 'apagar', venda })}
@@ -667,8 +890,24 @@ function HistoricoPageInner() {
                 <div className="text-[10px] uppercase text-slate-500 mt-2">
                   Pagamento via {vendaRecibo.forma_pagamento}
                   {vendaRecibo.parcelas > 1 ? ` (${vendaRecibo.parcelas}x)` : ''}
+                  {vendaRecibo.forma_pagamento === 'crediario' && vendaRecibo.crediario_frequencia ? ` • ${vendaRecibo.crediario_frequencia}` : ''}
                 </div>
               </div>
+
+              {vendaRecibo.forma_pagamento === 'crediario' && (vendaRecibo.crediario_parcelas?.length ?? 0) > 0 && (
+                <div className="mt-4 text-left text-[11px]">
+                  <div className="border-b-2 border-dashed border-slate-300 mb-3"></div>
+                  <div className="font-bold uppercase text-xs mb-2">Parcelas do crediário</div>
+                  <div className="space-y-1">
+                    {[...vendaRecibo.crediario_parcelas].sort((a, b) => a.numero - b.numero).map((p) => (
+                      <div key={p.id} className="flex justify-between">
+                        <span>{p.numero}ª — {formatDataCurta(p.data_vencimento)}</span>
+                        <span className="font-bold">{formatBRL(Number(p.valor) || 0)}{p.pago ? ' ✓ paga' : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="p-4 bg-slate-100 border-t border-slate-200 flex flex-col gap-2">
@@ -691,6 +930,111 @@ function HistoricoPageInner() {
                 className="w-full text-slate-500 py-2 font-bold uppercase tracking-widest text-[10px] hover:text-red-500 transition"
               >
                 Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL CONVERSÃO PARA CREDIÁRIO */}
+      {modalConversao && (
+        <div className="fixed inset-0 z-[60] bg-black/95 backdrop-blur-md flex items-center justify-center p-4 animate-in zoom-in-95 duration-200">
+          <div className="bg-slate-900 w-full max-w-md rounded-3xl border border-slate-700 shadow-2xl flex flex-col max-h-[92vh]">
+            <div className="p-5 border-b border-slate-800 shrink-0">
+              <h3 className="text-lg font-black uppercase text-white tracking-tighter">
+                Converter p/ <span className="text-violet-400">Crediário</span>
+              </h3>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mt-1">
+                Venda #{modalConversao.codigo_venda} • {modalConversao.nome_cliente?.trim()} • {formatBRL(modalConversao.valor_liquido || 0)}
+              </p>
+            </div>
+
+            <div className="p-5 space-y-4 overflow-y-auto">
+              {/* Frequência */}
+              <div className="grid grid-cols-3 gap-2">
+                {(['semanal', 'quinzenal', 'mensal'] as FrequenciaCrediario[]).map((fq) => (
+                  <button key={fq} onClick={() => setConv((prev) => ({ ...prev, frequencia: fq }))} className={`py-3 rounded-xl font-bold uppercase text-[10px] tracking-widest transition-all border-2 ${conv.frequencia === fq ? 'bg-violet-600 border-violet-500 text-white shadow' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600'}`}>
+                    {FREQ_LABEL[fq]}
+                  </button>
+                ))}
+              </div>
+
+              {/* Nº de parcelas + 1ª parcela */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Parcelas</label>
+                  <select className="w-full bg-slate-950 border-2 border-slate-800 p-3 rounded-xl text-white font-bold outline-none focus:border-violet-500" value={conv.numParcelas} onChange={(e) => setConv((prev) => ({ ...prev, numParcelas: parseInt(e.target.value) }))}>
+                    {Array.from({ length: 24 }, (_, i) => i + 1).map((p) => <option key={p} value={p}>{p}x</option>)}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">1ª parcela</label>
+                  <input type="date" className="w-full bg-slate-950 border-2 border-slate-800 p-3 rounded-xl text-white font-bold outline-none focus:border-violet-500" value={conv.primeiraData} onChange={(e) => { if (e.target.value) setConv((prev) => ({ ...prev, primeiraData: e.target.value })); }} />
+                </div>
+              </div>
+
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-relaxed">
+                Venda antiga controlada por fora? Marque as parcelas <span className="text-emerald-400">já pagas</span> — elas entram quitadas, sem passar pelos recebíveis.
+              </p>
+
+              {/* Parcelas: paga? + data + valor editável */}
+              <div className="bg-slate-950 border-2 border-slate-800 rounded-xl overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Parcelas</span>
+                  <button onClick={() => setConv((prev) => ({ ...prev, parcelas: gerarParcelasConv(modalConversao.valor_liquido || 0, prev.numParcelas, prev.primeiraData, prev.frequencia) }))} className="text-[10px] font-black uppercase tracking-widest text-violet-400 hover:text-violet-300 active:scale-95">↺ Redistribuir</button>
+                </div>
+                <div className="max-h-52 overflow-y-auto divide-y divide-slate-800/60">
+                  {conv.parcelas.map((p, idx) => (
+                    <div key={p.numero} className="flex items-center gap-2 px-3 py-2">
+                      <label className="flex items-center gap-1.5 shrink-0 cursor-pointer" title="Parcela já paga">
+                        <input
+                          type="checkbox"
+                          checked={p.pago}
+                          onChange={(e) => setConv((prev) => ({ ...prev, parcelas: prev.parcelas.map((pp) => pp.numero === p.numero ? { ...pp, pago: e.target.checked } : pp) }))}
+                          className="w-4 h-4 accent-emerald-500"
+                        />
+                        <span className={`text-[9px] font-black uppercase ${p.pago ? 'text-emerald-400' : 'text-slate-600'}`}>paga</span>
+                      </label>
+                      <span className="w-7 text-[11px] font-black text-slate-400 shrink-0">{p.numero}ª</span>
+                      <span className="flex-1 text-[11px] font-mono text-slate-300 truncate">{formatDataCurta(p.data_vencimento)}</span>
+                      <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-lg px-2 shrink-0">
+                        <span className="text-[10px] text-slate-500 font-bold">R$</span>
+                        <input
+                          type="text" inputMode="decimal" autoComplete="off"
+                          className="bg-transparent w-[4.5rem] py-2 text-sm font-bold text-white outline-none text-right"
+                          value={p.valorStr}
+                          onChange={(e) => {
+                            const raw = e.target.value.replace(/[^0-9.,]/g, '');
+                            setConv((prev) => ({
+                              ...prev,
+                              parcelas: prev.parcelas.map((pp) => pp.numero === p.numero ? { ...pp, valorStr: raw, valor: parseValorDigitado(raw) } : pp),
+                            }));
+                          }}
+                        />
+                      </div>
+                      {idx === conv.parcelas.length - 1 && conv.parcelas.length > 1 && (
+                        <button onClick={restoNaUltimaConv} title="Colocar o valor restante nesta parcela" className="shrink-0 text-[9px] font-black uppercase tracking-widest text-violet-300 bg-violet-950/40 border border-violet-900/50 hover:bg-violet-900/40 px-2 py-1.5 rounded-lg active:scale-95">
+                          resto
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className={`px-4 py-3 border-t flex items-center justify-between ${convSomaOk ? 'border-emerald-900/40 bg-emerald-950/20' : 'border-red-900/40 bg-red-950/20'}`}>
+                  <span className={`text-[10px] font-black uppercase tracking-widest ${convSomaOk ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {convSomaOk ? '✓ Soma confere' : `Diferença: ${formatBRL((convSomaCents - convTotalCents) / 100)}`}
+                  </span>
+                  <span className="text-xs font-black text-white">{formatBRL(convSomaCents / 100)} / {formatBRL(convTotalCents / 100)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-slate-800 grid grid-cols-2 gap-3 shrink-0">
+              <button onClick={() => setModalConversao(null)} disabled={convertendo} className="bg-slate-800 hover:bg-slate-700 text-white py-4 rounded-xl font-bold uppercase text-xs tracking-widest transition">
+                Voltar
+              </button>
+              <button onClick={confirmarConversao} disabled={convertendo || !convSomaOk || !convValoresOk} className="bg-violet-600 hover:bg-violet-500 text-white py-4 rounded-xl font-black uppercase text-xs tracking-widest transition shadow-lg disabled:opacity-50">
+                {convertendo ? 'Convertendo...' : 'Converter'}
               </button>
             </div>
           </div>
@@ -729,6 +1073,17 @@ function HistoricoPageInner() {
                     <b>#{modalConfirmacao.venda.codigo_venda}</b> do histórico.<br /><br />
                     <span className="text-red-400 font-bold">
                       ⚠️ O estoque NÃO será alterado.
+                    </span>
+                  </span>
+                )}
+                {modalConfirmacao.venda.forma_pagamento === 'crediario' && (modalConfirmacao.venda.crediario_parcelas?.length ?? 0) > 0 && (
+                  <span>
+                    <br /><br />
+                    <span className="text-violet-400 font-bold">
+                      💳 Venda em crediário: as {modalConfirmacao.venda.crediario_parcelas.length} parcela(s)
+                      {modalConfirmacao.venda.crediario_parcelas.filter((p) => p.pago).length > 0
+                        ? ` (${modalConfirmacao.venda.crediario_parcelas.filter((p) => p.pago).length} já paga(s))`
+                        : ''} serão removidas dos recebíveis junto com a venda.
                     </span>
                   </span>
                 )}

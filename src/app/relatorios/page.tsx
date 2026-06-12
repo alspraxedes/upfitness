@@ -170,6 +170,17 @@ function RelatoriosInner() {
     ticketMedio: 0,
   });
 
+  // KPIs de crediário (recebíveis): aberto/vencido são o saldo TOTAL atual;
+  // recebido acompanha o período filtrado (pela data de pagamento).
+  const [crediarioKpis, setCrediarioKpis] = useState({
+    aberto: 0,
+    qtdAberto: 0,
+    vencido: 0,
+    qtdVencido: 0,
+    recebidoPeriodo: 0,
+    qtdRecebidoPeriodo: 0,
+  });
+
   // UI: ranking produtos
   const [modoProdutos, setModoProdutos] = useState<'qtd' | 'margem'>('qtd');
   const [limiteProdutos, setLimiteProdutos] = useState(5);
@@ -303,6 +314,31 @@ function RelatoriosInner() {
       const itensVendidos = itens.reduce((a, x) => a + (Number(x.quantidade) || 0), 0);
       const ticketMedio = pedidos > 0 ? receita / pedidos : 0;
       setKpis({ receita, pedidos, itensVendidos, ticketMedio });
+
+      // 3b) Crediário (recebíveis)
+      const hojeStr = toISODateLocal(new Date());
+      const [{ data: abertasData, error: errAbertas }, { data: recebidasData, error: errRecebidas }] = await Promise.all([
+        supabase.from('crediario_parcelas').select('valor, data_vencimento').eq('pago', false),
+        supabase
+          .from('crediario_parcelas')
+          .select('valor')
+          .eq('pago', true)
+          .gte('data_pagamento', toISODateLocal(s))
+          .lte('data_pagamento', toISODateLocal(e)),
+      ]);
+      if (errAbertas) throw errAbertas;
+      if (errRecebidas) throw errRecebidas;
+      const abertas = ((abertasData as any) || []) as { valor: number; data_vencimento: string }[];
+      const vencidas = abertas.filter((p) => p.data_vencimento < hojeStr);
+      const recebidas = ((recebidasData as any) || []) as { valor: number }[];
+      setCrediarioKpis({
+        aberto: abertas.reduce((a, p) => a + (Number(p.valor) || 0), 0),
+        qtdAberto: abertas.length,
+        vencido: vencidas.reduce((a, p) => a + (Number(p.valor) || 0), 0),
+        qtdVencido: vencidas.length,
+        recebidoPeriodo: recebidas.reduce((a, p) => a + (Number(p.valor) || 0), 0),
+        qtdRecebidoPeriodo: recebidas.length,
+      });
 
       // 4) Série diária
       const map = new Map<string, number>();
@@ -618,6 +654,39 @@ function RelatoriosInner() {
             <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Ticket médio</span>
             <p className="text-lg md:text-xl font-black text-white truncate">{loading ? '—' : formatBRL(kpis.ticketMedio)}</p>
           </div>
+        </div>
+
+        {/* Crediário (recebíveis) */}
+        <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-lg space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-black text-violet-400 uppercase tracking-widest">Crediário</span>
+            <Link
+              href={`/recebiveis${dashQS}`}
+              className="text-[10px] font-black uppercase tracking-widest text-slate-300 hover:text-white bg-slate-950 border border-slate-800 hover:border-violet-500 px-3 py-1.5 rounded-xl active:scale-95 transition-colors"
+            >
+              Gerir recebíveis →
+            </Link>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-col justify-between">
+              <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Em aberto</span>
+              <p className="text-sm md:text-lg font-black text-white truncate">{loading ? '—' : formatBRL(crediarioKpis.aberto)}</p>
+              <span className="text-[9px] font-bold text-slate-600 uppercase">{loading ? '' : `${crediarioKpis.qtdAberto} parcela(s)`}</span>
+            </div>
+            <div className={`bg-slate-950 p-3 rounded-xl border flex flex-col justify-between ${crediarioKpis.qtdVencido > 0 ? 'border-red-900/60' : 'border-slate-800'}`}>
+              <span className="text-[9px] font-black text-red-400 uppercase tracking-widest">Vencido</span>
+              <p className="text-sm md:text-lg font-black text-white truncate">{loading ? '—' : formatBRL(crediarioKpis.vencido)}</p>
+              <span className="text-[9px] font-bold text-slate-600 uppercase">{loading ? '' : `${crediarioKpis.qtdVencido} parcela(s)`}</span>
+            </div>
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-col justify-between">
+              <span className="text-[9px] font-black text-emerald-400 uppercase tracking-widest">Recebido no período</span>
+              <p className="text-sm md:text-lg font-black text-white truncate">{loading ? '—' : formatBRL(crediarioKpis.recebidoPeriodo)}</p>
+              <span className="text-[9px] font-bold text-slate-600 uppercase">{loading ? '' : `${crediarioKpis.qtdRecebidoPeriodo} parcela(s)`}</span>
+            </div>
+          </div>
+          <p className="text-[9px] font-bold text-slate-600 uppercase tracking-widest">
+            Em aberto e vencido: saldo total atual • Recebido: pela data de pagamento dentro do período filtrado
+          </p>
         </div>
 
         {/* Cards */}
@@ -977,7 +1046,7 @@ function RelatoriosInner() {
 
       {/* NAV (Relatórios ativo) */}
       <div className="fixed left-6 right-6 z-[60]" style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + 10px)` }}>
-        <nav className="bg-slate-900/95 backdrop-blur-2xl border border-white/5 rounded-[2.5rem] h-20 px-6 flex items-center justify-around shadow-2xl">
+        <nav className="bg-slate-900/95 backdrop-blur-2xl border border-white/5 rounded-[2.5rem] h-20 px-4 flex items-center justify-around shadow-2xl">
           <Link href={`/${dashQS}`} className="flex flex-col items-center gap-1 opacity-40">
             <div className="p-2">
               <span className="text-xl">📦</span>
@@ -997,6 +1066,13 @@ function RelatoriosInner() {
               <span className="text-xl">🧾</span>
             </div>
             <span className="text-[9px] font-black text-white tracking-widest uppercase">Histórico</span>
+          </Link>
+
+          <Link href={`/recebiveis${dashQS}`} className="flex flex-col items-center gap-1 opacity-40">
+            <div className="p-2">
+              <span className="text-xl">💰</span>
+            </div>
+            <span className="text-[9px] font-black text-white tracking-widest uppercase">Recebíveis</span>
           </Link>
 
           <Link href={`/relatorios${dashQS}`} className="flex flex-col items-center gap-1">
