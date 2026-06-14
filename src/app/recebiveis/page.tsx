@@ -45,6 +45,10 @@ function getQS(searchParams: ReturnType<typeof useSearchParams>) {
   return qs ? `?${qs}` : '';
 }
 
+// Número em pt-BR sem o "R$" (o símbolo é renderizado à parte nos cards)
+const valorSemMoeda = (v: number) =>
+  new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
+
 // Linha de parcela no modal — componente de módulo (não recriado a cada render
 // do pai), com swipe-to-delete e campos inline.
 function LinhaParcela({
@@ -487,18 +491,27 @@ function RecebiveisPageInner() {
       </header>
 
       <main className="max-w-4xl mx-auto p-4 space-y-6">
-        <div className="grid grid-cols-3 gap-3">
-          <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between">
-            <span className="text-[10px] font-black text-violet-400 uppercase tracking-widest">Em aberto</span>
-            <p className="text-base md:text-xl font-black text-white truncate">{loading ? '—' : formatBRL(resumo.aberto)}</p>
+        <div className="grid grid-cols-3 gap-2 sm:gap-3">
+          <div className="bg-slate-900 p-3 sm:p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between gap-1">
+            <span className="text-[9px] sm:text-[10px] font-black text-violet-400 uppercase tracking-widest">Em aberto</span>
+            <p className="font-black text-white leading-none">
+              <span className="text-[10px] text-slate-500 mr-0.5">R$</span>
+              <span className="text-sm sm:text-xl">{loading ? '—' : valorSemMoeda(resumo.aberto)}</span>
+            </p>
           </div>
-          <div className={`bg-slate-900 p-4 rounded-2xl border shadow-lg flex flex-col justify-between ${resumo.qtdVencido > 0 ? 'border-red-900/60' : 'border-slate-800'}`}>
-            <span className="text-[10px] font-black text-red-400 uppercase tracking-widest">Vencido</span>
-            <p className="text-base md:text-xl font-black text-white truncate">{loading ? '—' : formatBRL(resumo.vencido)}</p>
+          <div className={`bg-slate-900 p-3 sm:p-4 rounded-2xl border shadow-lg flex flex-col justify-between gap-1 ${resumo.qtdVencido > 0 ? 'border-red-900/60' : 'border-slate-800'}`}>
+            <span className="text-[9px] sm:text-[10px] font-black text-red-400 uppercase tracking-widest">Vencido</span>
+            <p className="font-black text-white leading-none">
+              <span className="text-[10px] text-slate-500 mr-0.5">R$</span>
+              <span className="text-sm sm:text-xl">{loading ? '—' : valorSemMoeda(resumo.vencido)}</span>
+            </p>
           </div>
-          <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between">
-            <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Próx. 7 dias</span>
-            <p className="text-base md:text-xl font-black text-white truncate">{loading ? '—' : formatBRL(resumo.proximos7)}</p>
+          <div className="bg-slate-900 p-3 sm:p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between gap-1">
+            <span className="text-[9px] sm:text-[10px] font-black text-emerald-400 uppercase tracking-widest leading-tight">Próx. 7 dias</span>
+            <p className="font-black text-white leading-none">
+              <span className="text-[10px] text-slate-500 mr-0.5">R$</span>
+              <span className="text-sm sm:text-xl">{loading ? '—' : valorSemMoeda(resumo.proximos7)}</span>
+            </p>
           </div>
         </div>
 
