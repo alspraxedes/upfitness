@@ -17,6 +17,18 @@ interface ParcelaCrediarioRecibo {
   pago?: boolean;
 }
 
+// NOVO (Fase 3B): linha de pagamento para vendas com split.
+// Quando `pagamentos` é passado com >1 item, o recibo lista as N formas
+// em vez do `metodoPagamento` string. `pagamentos` com 1 item também
+// funciona (redundante com `metodoPagamento` mas OK). Se `pagamentos`
+// não é passado, o recibo cai no comportamento antigo (só metodoPagamento).
+interface PagamentoRecibo {
+  forma: string;
+  valor: number;
+  parcelas?: number; // só faz sentido para forma='credito'
+  crediario_frequencia?: string | null; // só faz sentido para forma='crediario'
+}
+
 interface ReciboProps {
   visivel: boolean;
   onClose: () => void;
@@ -25,7 +37,8 @@ interface ReciboProps {
     subtotal: number;
     desconto: number;
     totalFinal: number;
-    metodoPagamento: string;
+    metodoPagamento: string; // legado — usado quando `pagamentos` não vem
+    pagamentos?: PagamentoRecibo[]; // NOVO (Fase 3B): split
     crediario?: {
       frequencia: string;
       parcelas: ParcelaCrediarioRecibo[];
@@ -47,6 +60,8 @@ export default function ReciboModal({ visivel, onClose, dados }: ReciboProps) {
     const [y, m, d] = iso.split('-');
     return `${d}/${m}/${y.slice(2)}`;
   };
+
+  const usarSplit = (dados.pagamentos?.length ?? 0) > 1;
 
   const handlePrint = () => {
     const conteudo = printRef.current?.innerHTML;
@@ -77,8 +92,6 @@ export default function ReciboModal({ visivel, onClose, dados }: ReciboProps) {
     linhas.push('*COMPROVANTE UPFITNESS*');
     linhas.push('--------------------------------');
 
-    
-
     dados.itens.forEach((item) => {
       const unit = f(item.preco_venda);
       const totalItem = f(item.preco_venda * item.quantidade);
@@ -93,9 +106,25 @@ export default function ReciboModal({ visivel, onClose, dados }: ReciboProps) {
     linhas.push(`Subtotal: ${f(dados.subtotal)}`);
     if (dados.desconto > 0) linhas.push(`Desconto: - ${f(dados.desconto)}`);
     linhas.push(`*TOTAL: ${f(dados.totalFinal)}*`);
-    linhas.push(`Pagamento: ${dados.metodoPagamento}`);
+
+    if (usarSplit) {
+      linhas.push('Pagamento (split):');
+      dados.pagamentos!.forEach((p) => {
+        const parc = p.forma === 'credito' && (p.parcelas ?? 1) > 1 ? ` (${p.parcelas}x)` : '';
+        const freq =
+          p.forma === 'crediario' && p.crediario_frequencia ? ` — ${p.crediario_frequencia}` : '';
+        linhas.push(`  • ${p.forma}${parc}${freq}: ${f(p.valor)}`);
+      });
+    } else {
+      linhas.push(`Pagamento: ${dados.metodoPagamento}`);
+    }
+
     if (dados.crediario) {
-      linhas.push(`Parcelamento: ${dados.crediario.parcelas.length}x (${dados.crediario.frequencia})`);
+      // Só imprime cabeçalho de parcelamento aqui se NÃO for split (no split,
+      // a frequência do crediário já saiu na linha do pagamento acima).
+      if (!usarSplit) {
+        linhas.push(`Parcelamento: ${dados.crediario.parcelas.length}x (${dados.crediario.frequencia})`);
+      }
       dados.crediario.parcelas.forEach((p) => {
         linhas.push(`${p.numero}ª — ${fd(p.data_vencimento)}: ${f(p.valor)}${p.pago ? ' (paga)' : ''}`);
       });
@@ -117,7 +146,6 @@ export default function ReciboModal({ visivel, onClose, dados }: ReciboProps) {
             <h2 className="text-xl font-black uppercase tracking-tighter">UPFITNESS</h2>
             <p className="text-xs text-gray-600">Moda Fitness & Casual</p>
             <p className="text-[10px] text-gray-500 mt-1">{dados.data.toLocaleString('pt-BR')}</p>
-            
           </div>
 
           <div className="border-b-2 border-dashed border-gray-300 my-4"></div>
@@ -164,16 +192,37 @@ export default function ReciboModal({ visivel, onClose, dados }: ReciboProps) {
               <span>TOTAL</span>
               <span>{f(dados.totalFinal)}</span>
             </div>
-            <div className="text-xs text-gray-500 mt-1 uppercase">
-              Pagamento: {dados.metodoPagamento}
-            </div>
+
+            {usarSplit ? (
+              <div className="text-left text-[11px] text-gray-700 mt-2">
+                <div className="font-bold uppercase text-xs mb-1">Pagamento (split)</div>
+                <div className="space-y-0.5">
+                  {dados.pagamentos!.map((p, i) => (
+                    <div key={i} className="flex justify-between">
+                      <span>
+                        • {p.forma}
+                        {p.forma === 'credito' && (p.parcelas ?? 1) > 1 ? ` (${p.parcelas}x)` : ''}
+                        {p.forma === 'crediario' && p.crediario_frequencia ? ` — ${p.crediario_frequencia}` : ''}
+                      </span>
+                      <span className="font-bold">{f(p.valor)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="text-xs text-gray-500 mt-1 uppercase">
+                Pagamento: {dados.metodoPagamento}
+              </div>
+            )}
           </div>
 
           {dados.crediario && (
             <div className="mt-4 text-left text-[11px] text-gray-700">
               <div className="border-b-2 border-dashed border-gray-300 mb-3"></div>
               <div className="font-bold uppercase text-xs mb-2">
-                Crediário — {dados.crediario.parcelas.length}x ({dados.crediario.frequencia})
+                {usarSplit
+                  ? `Parcelas do crediário (${dados.crediario.parcelas.length}x)`
+                  : `Crediário — ${dados.crediario.parcelas.length}x (${dados.crediario.frequencia})`}
               </div>
               <div className="space-y-1">
                 {dados.crediario.parcelas.map((p) => (

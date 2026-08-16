@@ -92,6 +92,46 @@ type PedidoCatalogoItem = {
 // --- UTILITÁRIOS ---
 const formatBRL = (val: number) => val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
+// --- FORMAS DE PAGAMENTO (Fase 3A) — split payment ---
+type FormaSimples = 'pix' | 'dinheiro' | 'debito';
+type FormaTodas = FormaSimples | 'credito' | 'crediario';
+
+const FORMA_LABEL_VENDA: Record<FormaTodas, string> = {
+  pix: 'PIX',
+  dinheiro: 'Dinheiro',
+  debito: 'Débito',
+  credito: 'Crédito',
+  crediario: 'Crediário',
+};
+
+type ParcelaCred = {
+  numero: number;
+  valor: number;
+  valorStr: string;
+  data_vencimento: string;
+  pago: boolean;
+};
+
+type LinhaSimples = { key: string; forma: FormaSimples; valorStr: string };
+type LinhaCredito = { key: string; forma: 'credito'; valorStr: string; parcelas: number };
+type LinhaCrediario = {
+  key: string;
+  forma: 'crediario';
+  valorStr: string;
+  crediario: {
+    frequencia: FrequenciaCrediario;
+    primeiraData: string;
+    numParcelas: number;
+    baixarPrimeira: boolean;
+    parcelas: ParcelaCred[];
+  };
+};
+type LinhaPagto = LinhaSimples | LinhaCredito | LinhaCrediario;
+
+let _keyCounterVenda = 0;
+const novoKeyVenda = () => `l-${Date.now()}-${++_keyCounterVenda}`;
+
+
 // --- CREDIÁRIO ---
 type FrequenciaCrediario = 'semanal' | 'quinzenal' | 'mensal';
 
@@ -236,21 +276,15 @@ function VendaPageInner() {
   const [mostrarSugestoes, setMostrarSugestoes] = useState(false);
 
   const [pagamento, setPagamento] = useState({
-    metodo: 'pix',
-    parcelas: 1,
     descontoTipo: 'reais' as 'reais' | 'porcentagem',
     descontoValor: 0,
     valorFinal: 0,
   });
 
-  // Crediário: parâmetros + parcelas geradas (valores editáveis)
-  const [crediario, setCrediario] = useState({
-    frequencia: 'quinzenal' as FrequenciaCrediario,
-    numParcelas: 4,
-    primeiraData: hojeISO(),
-    baixarPrimeira: false,
-    parcelas: [] as ParcelaCrediario[],
-  });
+  // Linhas de pagamento (split) — Fase 3A.
+  // Sempre começa com 1 linha PIX pelo valor final. Usuária pode adicionar
+  // mais formas via botões "+ Adicionar forma".
+  const [pagamentos, setPagamentos] = useState<LinhaPagto[]>([]);
 
   const [imgSrc, setImgSrc] = useState<string | null>(null);
   const [crop, setCrop] = useState({ x: 0, y: 0 });
@@ -347,17 +381,20 @@ function VendaPageInner() {
     setPagamento((prev) => ({ ...prev, valorFinal: Math.max(0, final) }));
   }, [carrinho, pagamento.descontoTipo, pagamento.descontoValor]);
 
-  // Crediário: regera as parcelas quando os parâmetros mudam (valor final,
-  // nº de parcelas, 1ª data ou frequência). Edições manuais de valor
-  // persistem até o próximo ajuste de parâmetro ou clique em Redistribuir.
+  // Auto-sync: se há exatamente 1 linha de pagamento, o valor dela
+  // acompanha o valorFinal (que muda quando a usuária mexe no desconto).
+  // Com >1 linhas, não mexemos — usuária ajusta manualmente ("resto" na
+  // última linha ajuda a bater o total).
   useEffect(() => {
-    if (pagamento.metodo !== 'crediario') return;
-    setCrediario((prev) => ({
-      ...prev,
-      parcelas: gerarParcelasCrediario(pagamento.valorFinal, prev.numParcelas, prev.primeiraData, prev.frequencia),
-    }));
+    if (pagamentos.length !== 1) return;
+    setPagamentos((prev) => {
+      if (prev.length !== 1) return prev;
+      const alvo = valorParaStr(pagamento.valorFinal);
+      if (prev[0].valorStr === alvo) return prev;
+      return [{ ...prev[0], valorStr: alvo } as LinhaPagto];
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pagamento.metodo, pagamento.valorFinal, crediario.numParcelas, crediario.primeiraData, crediario.frequencia]);
+  }, [pagamento.valorFinal, pagamentos.length]);
 
   useEffect(() => {
     if (mostrarScanner) {
@@ -577,26 +614,171 @@ function VendaPageInner() {
     return clientesExistentes.filter((n) => n.toLowerCase().includes(q));
   }, [nomeCliente, clientesExistentes]);
 
-  // Crediário: validação em centavos inteiros (sem dust de float)
-  const totalCentsCrediario = Math.round(pagamento.valorFinal * 100);
-  const somaCentsCrediario = crediario.parcelas.reduce((acc, p) => acc + Math.round(p.valor * 100), 0);
-  const crediarioSomaOk = crediario.parcelas.length > 0 && somaCentsCrediario === totalCentsCrediario;
-  const crediarioParcelasValidas = crediario.parcelas.length > 0 && crediario.parcelas.every((p) => Math.round(p.valor * 100) > 0);
-  const crediarioClienteOk = nomeCliente.trim().length > 0;
-  const crediarioPronto = crediarioSomaOk && crediarioParcelasValidas && crediarioClienteOk;
+  // ---- Validações do split (Fase 3A) ----
+  const valorFinalCents = Math.round(pagamento.valorFinal * 100);
+  const somaPgtosCents = pagamentos.reduce(
+    (s, l) => s + Math.round(parseValorDigitado(l.valorStr) * 100),
+    0
+  );
+  const diffPgtosCents = somaPgtosCents - valorFinalCents;
+  const somaPgtosOk = pagamentos.length > 0 && diffPgtosCents === 0;
+  const temCrediario = pagamentos.some((l) => l.forma === 'crediario');
+  const nomeClienteOk = nomeCliente.trim().length > 0;
+  const crediarioClienteOk = !temCrediario || nomeClienteOk;
+  const linhaCrediarioAtual = pagamentos.find((l) => l.forma === 'crediario') as LinhaCrediario | undefined;
 
-  // Joga o que falta (valor final − soma das demais) na última parcela
-  function restoNaUltima() {
-    setCrediario((prev) => {
-      if (prev.parcelas.length === 0) return prev;
-      const somaOutras = prev.parcelas.slice(0, -1).reduce((a, p) => a + Math.round(p.valor * 100), 0);
-      const resto = Math.max(0, totalCentsCrediario - somaOutras);
+  // Validações finas de cada linha (usadas pelo botão de confirmar)
+  const pagamentoValido = useMemo(() => {
+    if (pagamentos.length === 0) return { ok: false, msg: 'Adicione ao menos uma forma de pagamento.' };
+    for (const l of pagamentos) {
+      const v = parseValorDigitado(l.valorStr);
+      if (v <= 0) return { ok: false, msg: `Valor de ${FORMA_LABEL_VENDA[l.forma]} deve ser > 0.` };
+    }
+    if (!somaPgtosOk) {
       return {
-        ...prev,
-        parcelas: prev.parcelas.map((p, i) =>
-          i === prev.parcelas.length - 1 ? { ...p, valor: resto / 100, valorStr: valorParaStr(resto / 100) } : p
-        ),
+        ok: false,
+        msg: diffPgtosCents > 0
+          ? `Soma passou ${formatBRL(diffPgtosCents / 100)} do total.`
+          : `Faltam ${formatBRL(-diffPgtosCents / 100)} para bater o total.`,
       };
+    }
+    if (pagamentos.filter((l) => l.forma === 'crediario').length > 1) {
+      return { ok: false, msg: 'Só é permitido 1 pagamento em crediário por venda.' };
+    }
+    if (temCrediario && !nomeClienteOk) {
+      return { ok: false, msg: 'Crediário exige o nome da cliente.' };
+    }
+    if (linhaCrediarioAtual) {
+      const c = linhaCrediarioAtual.crediario;
+      const somaP = c.parcelas.reduce((s, p) => s + Math.round(p.valor * 100), 0);
+      const valLinha = Math.round(parseValorDigitado(linhaCrediarioAtual.valorStr) * 100);
+      if (c.parcelas.length === 0) return { ok: false, msg: 'Crediário precisa de ao menos 1 parcela.' };
+      if (somaP !== valLinha) {
+        return {
+          ok: false,
+          msg: `Parcelas do crediário somam ${formatBRL(somaP / 100)}, precisam somar ${formatBRL(valLinha / 100)}.`,
+        };
+      }
+      if (c.parcelas.some((p) => Math.round(p.valor * 100) <= 0)) {
+        return { ok: false, msg: 'Todas as parcelas do crediário precisam ter valor > 0.' };
+      }
+    }
+    return { ok: true, msg: '' };
+  }, [pagamentos, somaPgtosOk, diffPgtosCents, temCrediario, nomeClienteOk, linhaCrediarioAtual]);
+
+  // ---- Handlers de linhas de pagamento ----
+  function adicionarLinhaPgto(forma: FormaTodas) {
+    if (forma === 'crediario' && temCrediario) return;
+    const faltaCents = Math.max(0, valorFinalCents - somaPgtosCents);
+    const valorSug = faltaCents > 0 ? valorParaStr(faltaCents / 100) : '0,00';
+    setPagamentos((prev) => {
+      if (forma === 'crediario') {
+        const geradas = gerarParcelasCrediario(faltaCents / 100, 4, hojeISO(), 'quinzenal');
+        return [
+          ...prev,
+          {
+            key: novoKeyVenda(),
+            forma: 'crediario',
+            valorStr: valorSug,
+            crediario: {
+              frequencia: 'quinzenal',
+              primeiraData: hojeISO(),
+              numParcelas: 4,
+              baixarPrimeira: false,
+              parcelas: geradas.map((g) => ({ ...g, pago: false })),
+            },
+          } as LinhaCrediario,
+        ];
+      }
+      if (forma === 'credito') {
+        return [...prev, { key: novoKeyVenda(), forma: 'credito', valorStr: valorSug, parcelas: 1 } as LinhaCredito];
+      }
+      return [...prev, { key: novoKeyVenda(), forma, valorStr: valorSug } as LinhaSimples];
+    });
+  }
+
+  function removerLinhaPgto(key: string) {
+    setPagamentos((prev) => prev.filter((l) => l.key !== key));
+  }
+
+  function atualizarValorLinhaPgto(key: string, valorStr: string) {
+    const raw = valorStr.replace(/[^0-9.,]/g, '');
+    setPagamentos((prev) =>
+      prev.map((l) => (l.key === key ? ({ ...l, valorStr: raw } as LinhaPagto) : l))
+    );
+  }
+
+  function atualizarParcelasCreditoLinha(key: string, parcelas: number) {
+    setPagamentos((prev) =>
+      prev.map((l) =>
+        l.key === key && l.forma === 'credito' ? ({ ...l, parcelas } as LinhaCredito) : l
+      )
+    );
+  }
+
+  function atualizarCredParamLinha(key: string, patch: Partial<LinhaCrediario['crediario']>) {
+    setPagamentos((prev) =>
+      prev.map((l) => {
+        if (l.key !== key || l.forma !== 'crediario') return l;
+        return { ...l, crediario: { ...l.crediario, ...patch } } as LinhaCrediario;
+      })
+    );
+  }
+
+  function regenerarParcelasCredLinha(key: string) {
+    setPagamentos((prev) =>
+      prev.map((l) => {
+        if (l.key !== key || l.forma !== 'crediario') return l;
+        const valor = parseValorDigitado(l.valorStr);
+        const geradas = gerarParcelasCrediario(valor, l.crediario.numParcelas, l.crediario.primeiraData, l.crediario.frequencia);
+        // preserva paga da 1ª se estava marcada
+        const parcelasNovas: ParcelaCred[] = geradas.map((g, i) => ({
+          ...g,
+          pago: i === 0 ? l.crediario.baixarPrimeira : false,
+        }));
+        return { ...l, crediario: { ...l.crediario, parcelas: parcelasNovas } } as LinhaCrediario;
+      })
+    );
+  }
+
+  function atualizarParcelaCredLinha(linhaKey: string, numero: number, patch: Partial<ParcelaCred>) {
+    setPagamentos((prev) =>
+      prev.map((l) => {
+        if (l.key !== linhaKey || l.forma !== 'crediario') return l;
+        return {
+          ...l,
+          crediario: {
+            ...l.crediario,
+            parcelas: l.crediario.parcelas.map((p) => (p.numero === numero ? { ...p, ...patch } : p)),
+          },
+        } as LinhaCrediario;
+      })
+    );
+  }
+
+  function restoNaUltimaParcelaCredLinha(linhaKey: string) {
+    const linha = pagamentos.find((l) => l.key === linhaKey);
+    if (!linha || linha.forma !== 'crediario') return;
+    const valLinhaCents = Math.round(parseValorDigitado(linha.valorStr) * 100);
+    const parc = linha.crediario.parcelas;
+    if (parc.length === 0) return;
+    const somaOutras = parc.slice(0, -1).reduce((s, p) => s + Math.round(p.valor * 100), 0);
+    const restoCents = Math.max(0, valLinhaCents - somaOutras);
+    atualizarCredParamLinha(linhaKey, {
+      parcelas: parc.map((p, i) =>
+        i === parc.length - 1 ? { ...p, valor: restoCents / 100, valorStr: valorParaStr(restoCents / 100) } : p
+      ),
+    });
+  }
+
+  // Joga a diferença faltante do TOTAL na última linha de pagamento
+  // (útil quando split e a soma não bate).
+  function restoTotalNaUltimaLinha() {
+    setPagamentos((prev) => {
+      if (prev.length === 0) return prev;
+      const somaOutras = prev.slice(0, -1).reduce((s, l) => s + Math.round(parseValorDigitado(l.valorStr) * 100), 0);
+      const restoCents = Math.max(0, valorFinalCents - somaOutras);
+      return prev.map((l, i) => (i === prev.length - 1 ? { ...l, valorStr: valorParaStr(restoCents / 100) } as LinhaPagto : l));
     });
   }
 
@@ -610,8 +792,11 @@ function VendaPageInner() {
   async function abrirModalPagamento() {
     if (carrinho.length === 0) return alert('Carrinho vazio.');
     if (bloquearFechamentoSeZerados()) return;
-    setPagamento({ metodo: 'pix', parcelas: 1, descontoTipo: 'reais', descontoValor: 0, valorFinal: totalBruto });
-    setCrediario({ frequencia: 'quinzenal', numParcelas: 4, primeiraData: hojeISO(), baixarPrimeira: false, parcelas: [] });
+    setPagamento({ descontoTipo: 'reais', descontoValor: 0, valorFinal: totalBruto });
+    // Estado inicial: 1 linha PIX pelo total (auto-sync mantém em dia com desconto)
+    setPagamentos([
+      { key: novoKeyVenda(), forma: 'pix', valorStr: valorParaStr(totalBruto) } as LinhaSimples,
+    ]);
     const { data: clientesData } = await supabase
   .from('vendas')
   .select('nome_cliente')
@@ -740,80 +925,98 @@ setMostrarSugestoes(false);
 
   async function confirmarVenda() {
     if (bloquearFechamentoSeZerados()) return;
-    if (pagamento.metodo === 'crediario') {
-      if (!crediarioClienteOk) { alert('Crediário exige o nome da cliente.'); return; }
-      if (!crediarioParcelasValidas) { alert('Todas as parcelas precisam ter valor maior que zero.'); return; }
-      if (!crediarioSomaOk) { alert(`A soma das parcelas (${formatBRL(somaCentsCrediario / 100)}) precisa ser igual ao valor final (${formatBRL(totalCentsCrediario / 100)}).`); return; }
+    if (!pagamentoValido.ok) {
+      alert(pagamentoValido.msg);
+      return;
     }
     setLoading(true);
     const itensPayload = carrinho.map((i) => ({
       produto_id: i.produto_id,
       estoque_id: i.estoque_id,
       descricao_completa: `${i.descricao} - ${i.cor} (${i.tamanho})`,
-      cor: i.cor,                          // NOVO
+      cor: i.cor,
       quantidade: i.qtd,
       preco_unitario: i.preco,
       subtotal: i.preco * i.qtd,
     }));
 
-    // Parcelas do crediário (a 1ª já sai paga se a checkbox estiver marcada)
-    const parcelasCrediarioPayload = pagamento.metodo === 'crediario'
-      ? crediario.parcelas.map((p, idx) => ({
+    // Monta payload das N formas de pagamento para o RPC novo.
+    const pagamentosPayload = pagamentos.map((l) => {
+      const base: any = {
+        forma: l.forma,
+        valor: Math.round(parseValorDigitado(l.valorStr) * 100) / 100,
+      };
+      if (l.forma === 'credito') base.parcelas = l.parcelas;
+      if (l.forma === 'crediario') {
+        base.crediario_frequencia = l.crediario.frequencia;
+        base.crediario_parcelas = l.crediario.parcelas.map((p, idx) => ({
           numero: p.numero,
           valor: Math.round(p.valor * 100) / 100,
           data_vencimento: p.data_vencimento,
-          pago: idx === 0 && crediario.baixarPrimeira,
-        }))
-      : null;
+          pago: idx === 0 ? l.crediario.baixarPrimeira : false,
+        }));
+      }
+      return base;
+    });
 
-    let error;
-    if (pagamento.metodo === 'crediario') {
-      // RPC transacional própria: venda + itens + baixa de estoque + parcelas
-      ({ error } = await supabase.rpc('realizar_venda_crediario', {
-        p_valor_bruto: totalBruto,
-        p_valor_liquido: pagamento.valorFinal,
-        p_desconto: totalBruto - pagamento.valorFinal,
-        p_itens: itensPayload,
-        p_nome_cliente: nomeCliente.trim(),
-        p_frequencia: crediario.frequencia,
-        p_parcelas_crediario: parcelasCrediarioPayload,
-      }));
-    } else {
-      ({ error } = await supabase.rpc('realizar_venda', {
-        p_valor_bruto: totalBruto,
-        p_valor_liquido: pagamento.valorFinal,
-        p_desconto: totalBruto - pagamento.valorFinal,
-        p_forma_pagamento: pagamento.metodo,
-        p_parcelas: pagamento.metodo === 'credito' ? pagamento.parcelas : 1,
-        p_itens: itensPayload,
-        p_nome_cliente: nomeCliente.trim() || null,  // NOVO
-      }));
-    }
+    const { error } = await supabase.rpc('criar_venda_com_pagamentos', {
+      p_valor_bruto: totalBruto,
+      p_valor_liquido: pagamento.valorFinal,
+      p_desconto: totalBruto - pagamento.valorFinal,
+      p_itens: itensPayload,
+      p_nome_cliente: nomeCliente.trim() || null,
+      p_pagamentos: pagamentosPayload,
+    });
+
     setLoading(false);
     if (error) { alert('Erro: ' + error.message); return; }
     if (draftAtualId) { await supabase.from('venda_drafts').delete().eq('id', draftAtualId); setDraftAtualId(null); setDraftAtualTitulo(''); await fetchDrafts(); }
+
+    // Monta dados do recibo (usa a nova prop `pagamentos` do ReciboModal
+    // quando há split; para 1 forma o `metodoPagamento` também funciona).
+    const linhaCred = pagamentos.find((l) => l.forma === 'crediario') as LinhaCrediario | undefined;
+    const usarSplit = pagamentos.length > 1;
     setDadosRecibo({
       itens: carrinho.map((i) => ({
         descricao: i.descricao,
         quantidade: i.qtd,
         preco_venda: i.preco,
         tamanho: i.tamanho,
-        cor: i.cor,                              // NOVO
+        cor: i.cor,
       })),
       subtotal: totalBruto,
       desconto: totalBruto - pagamento.valorFinal,
       totalFinal: pagamento.valorFinal,
-      metodoPagamento: pagamento.metodo === 'crediario' ? 'Crediário' : pagamento.metodo,
-      crediario: pagamento.metodo === 'crediario' && parcelasCrediarioPayload
-        ? { frequencia: crediario.frequencia, parcelas: parcelasCrediarioPayload }
+      metodoPagamento: usarSplit
+        ? 'Split'
+        : pagamentos[0].forma === 'crediario' ? 'Crediário' : pagamentos[0].forma,
+      pagamentos: usarSplit
+        ? pagamentos.map((l) => ({
+            forma: l.forma,
+            valor: Math.round(parseValorDigitado(l.valorStr) * 100) / 100,
+            parcelas: l.forma === 'credito' ? l.parcelas : undefined,
+            crediario_frequencia: l.forma === 'crediario' ? l.crediario.frequencia : undefined,
+          }))
+        : undefined,
+      crediario: linhaCred
+        ? {
+            frequencia: linhaCred.crediario.frequencia,
+            parcelas: linhaCred.crediario.parcelas.map((p, idx) => ({
+              numero: p.numero,
+              valor: Math.round(p.valor * 100) / 100,
+              data_vencimento: p.data_vencimento,
+              pago: idx === 0 ? linhaCred.crediario.baixarPrimeira : false,
+            })),
+          }
         : undefined,
       data: new Date(),
-      cliente: nomeCliente.trim() || undefined,  // NOVO
+      cliente: nomeCliente.trim() || undefined,
     });
     setMostrarRecibo(true);
     setModalPagamento(false);
     setCarrinho([]);
     setNomeCliente('');
+    setPagamentos([]);
     setAbaMobile('busca');
     await fetchProdutos();
   }
@@ -1251,7 +1454,7 @@ setMostrarSugestoes(false);
             <div className="space-y-2 relative">
     <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">
       Nome da Cliente{' '}
-      {pagamento.metodo === 'crediario' ? (
+      {temCrediario ? (
         <span className="text-violet-400 normal-case font-bold">(obrigatório no crediário)</span>
       ) : (
         <span className="text-slate-600 normal-case font-normal">(opcional)</span>
@@ -1261,7 +1464,7 @@ setMostrarSugestoes(false);
       type="text"
       placeholder="Ex: Paty Maionese"
       autoComplete="off"
-      className={`w-full bg-slate-950 border-2 focus:border-pink-500 outline-none p-4 rounded-2xl text-white font-bold text-base placeholder:text-slate-600 h-16 ${pagamento.metodo === 'crediario' && !crediarioClienteOk ? 'border-red-900/70' : 'border-slate-800'}`}
+      className={`w-full bg-slate-950 border-2 focus:border-pink-500 outline-none p-4 rounded-2xl text-white font-bold text-base placeholder:text-slate-600 h-16 ${temCrediario && !nomeClienteOk ? 'border-red-900/70' : 'border-slate-800'}`}
       value={nomeCliente}
       onChange={(e) => {
         setNomeCliente(e.target.value);
@@ -1322,111 +1525,94 @@ setMostrarSugestoes(false);
                   </div>
                 </div>
               </div>
+              {/* FORMAS DE PAGAMENTO — N linhas (split) */}
               <div className="space-y-4">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Forma de Pagamento</label>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {['pix', 'dinheiro', 'debito', 'credito', 'crediario'].map((m) => (
-                    <button key={m} onClick={() => setPagamento((prev) => ({ ...prev, metodo: m }))} className={`py-5 rounded-xl font-bold uppercase text-xs tracking-widest transition-all border-2 ${m === 'crediario' ? 'col-span-2 md:col-span-4' : ''} ${pagamento.metodo === m ? (m === 'crediario' ? 'bg-violet-600 border-violet-500 text-white shadow-lg scale-[1.02]' : 'bg-emerald-600 border-emerald-500 text-white shadow-lg scale-105') : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600'}`}>
-                      {m === 'credito' ? 'Crédito' : m === 'debito' ? 'Débito' : m === 'crediario' ? 'Crediário' : m}
-                    </button>
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">
+                  Formas de Pagamento
+                </label>
+
+                <div className="space-y-3">
+                  {pagamentos.map((linha) => (
+                    <LinhaPagtoCardVenda
+                      key={linha.key}
+                      linha={linha}
+                      onValorChange={(v) => atualizarValorLinhaPgto(linha.key, v)}
+                      onParcelasCreditoChange={(n) => atualizarParcelasCreditoLinha(linha.key, n)}
+                      onCredParamChange={(patch) => atualizarCredParamLinha(linha.key, patch)}
+                      onCredParcelaChange={(num, patch) => atualizarParcelaCredLinha(linha.key, num, patch)}
+                      onCredRedistribuir={() => regenerarParcelasCredLinha(linha.key)}
+                      onCredRestoUltima={() => restoNaUltimaParcelaCredLinha(linha.key)}
+                      onRemover={() => removerLinhaPgto(linha.key)}
+                      podeRemover={pagamentos.length > 1}
+                    />
                   ))}
                 </div>
-              </div>
-              {pagamento.metodo === 'credito' && (
-                <div className="space-y-4 animate-in fade-in slide-in-from-top-4">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Parcelamento</label>
-                  <select className="w-full bg-slate-950 border-2 border-slate-800 p-4 rounded-xl text-white font-bold outline-none focus:border-emerald-500 h-16 text-lg" value={pagamento.parcelas} onChange={(e) => setPagamento((prev) => ({ ...prev, parcelas: parseInt(e.target.value) }))}>
-                    {[1,2,3,4,5,6,7,8,9,10,11,12].map((p) => <option key={p} value={p}>{p}x de {formatBRL(pagamento.valorFinal / p)} {p === 1 ? '(À Vista)' : '(Sem Juros)'}</option>)}
-                  </select>
-                </div>
-              )}
-              {pagamento.metodo === 'crediario' && (
-                <div className="space-y-4 animate-in fade-in slide-in-from-top-4">
-                  <label className="text-xs font-bold text-violet-400 uppercase tracking-widest">Crediário</label>
 
-                  {/* Frequência */}
-                  <div className="grid grid-cols-3 gap-3">
-                    {(['semanal', 'quinzenal', 'mensal'] as FrequenciaCrediario[]).map((fq) => (
-                      <button key={fq} onClick={() => setCrediario((prev) => ({ ...prev, frequencia: fq }))} className={`py-4 rounded-xl font-bold uppercase text-[10px] tracking-widest transition-all border-2 ${crediario.frequencia === fq ? 'bg-violet-600 border-violet-500 text-white shadow' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600'}`}>
-                        {FREQ_LABEL[fq]}
+                {/* Botões para adicionar formas */}
+                <div className="border border-dashed border-slate-800 rounded-2xl p-3 space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    + Adicionar forma
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                    {(['pix', 'dinheiro', 'debito', 'credito', 'crediario'] as FormaTodas[]).map((f) => {
+                      const bloqueado = f === 'crediario' && temCrediario;
+                      return (
+                        <button
+                          key={f}
+                          onClick={() => adicionarLinhaPgto(f)}
+                          disabled={bloqueado}
+                          className={`py-3 rounded-xl text-[10px] font-black uppercase tracking-widest border transition ${
+                            bloqueado
+                              ? 'bg-slate-950 border-slate-900 text-slate-700 cursor-not-allowed'
+                              : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-600 active:scale-95'
+                          }`}
+                          title={bloqueado ? 'Já existe uma linha de crediário' : undefined}
+                        >
+                          + {FORMA_LABEL_VENDA[f]}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Barra de soma / diferença */}
+                <div
+                  className={`rounded-xl border px-4 py-3 flex items-center justify-between ${
+                    somaPgtosOk
+                      ? 'border-emerald-900/40 bg-emerald-950/20'
+                      : 'border-red-900/40 bg-red-950/20'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`text-[10px] font-black uppercase tracking-widest ${
+                        somaPgtosOk ? 'text-emerald-400' : 'text-red-400'
+                      }`}
+                    >
+                      {somaPgtosOk ? '✓ Soma confere' : `Diferença: ${formatBRL(diffPgtosCents / 100)}`}
+                    </span>
+                    {!somaPgtosOk && pagamentos.length > 1 && (
+                      <button
+                        onClick={restoTotalNaUltimaLinha}
+                        className="text-[9px] font-black uppercase tracking-widest text-violet-300 bg-violet-950/40 border border-violet-900/50 hover:bg-violet-900/40 px-2 py-1 rounded-lg active:scale-95"
+                      >
+                        resto na última
                       </button>
-                    ))}
+                    )}
                   </div>
-
-                  {/* Nº de parcelas + data da 1ª parcela */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Parcelas</label>
-                      <select className="w-full bg-slate-950 border-2 border-slate-800 p-4 rounded-xl text-white font-bold outline-none focus:border-violet-500 h-16 text-lg" value={crediario.numParcelas} onChange={(e) => setCrediario((prev) => ({ ...prev, numParcelas: parseInt(e.target.value) }))}>
-                        {Array.from({ length: 24 }, (_, i) => i + 1).map((p) => <option key={p} value={p}>{p}x</option>)}
-                      </select>
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">1ª parcela</label>
-                      <input type="date" className="w-full bg-slate-950 border-2 border-slate-800 p-4 rounded-xl text-white font-bold outline-none focus:border-violet-500 h-16" value={crediario.primeiraData} onChange={(e) => { if (e.target.value) setCrediario((prev) => ({ ...prev, primeiraData: e.target.value })); }} />
-                    </div>
-                  </div>
-
-                  {/* Baixa imediata da 1ª parcela */}
-                  <label className="flex items-center gap-3 bg-slate-950 border-2 border-slate-800 rounded-xl p-4 cursor-pointer hover:border-slate-600 transition-colors">
-                    <input type="checkbox" checked={crediario.baixarPrimeira} onChange={(e) => setCrediario((prev) => ({ ...prev, baixarPrimeira: e.target.checked }))} className="w-5 h-5 accent-violet-500 shrink-0" />
-                    <span className="text-xs font-bold text-slate-300 uppercase tracking-widest">Dar baixa na 1ª parcela agora (paga no ato)</span>
-                  </label>
-
-                  {/* Parcelas: datas geradas + valores editáveis */}
-                  <div className="bg-slate-950 border-2 border-slate-800 rounded-xl overflow-hidden">
-                    <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Parcelas — valores editáveis</span>
-                      <button onClick={() => setCrediario((prev) => ({ ...prev, parcelas: gerarParcelasCrediario(pagamento.valorFinal, prev.numParcelas, prev.primeiraData, prev.frequencia) }))} className="text-[10px] font-black uppercase tracking-widest text-violet-400 hover:text-violet-300 active:scale-95">↺ Redistribuir</button>
-                    </div>
-                    <div className="max-h-56 overflow-y-auto divide-y divide-slate-800/60">
-                      {crediario.parcelas.map((p, idx) => (
-                        <div key={p.numero} className="flex items-center gap-3 px-4 py-2">
-                          <span className="w-8 text-[11px] font-black text-slate-400 shrink-0">{p.numero}ª</span>
-                          <span className="flex-1 text-[11px] font-mono text-slate-300 truncate">{formatDataCurta(p.data_vencimento)}</span>
-                          {idx === 0 && crediario.baixarPrimeira && (
-                            <span className="text-[9px] font-black uppercase text-emerald-400 bg-emerald-900/20 border border-emerald-900/30 px-2 py-0.5 rounded-lg shrink-0">paga no ato</span>
-                          )}
-                          <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-lg px-2 shrink-0">
-                            <span className="text-[10px] text-slate-500 font-bold">R$</span>
-                            <input
-                              type="text" inputMode="decimal" autoComplete="off"
-                              className="bg-transparent w-20 py-2 text-sm font-bold text-white outline-none text-right"
-                              value={p.valorStr}
-                              onChange={(e) => {
-                                const raw = e.target.value.replace(/[^0-9.,]/g, '');
-                                setCrediario((prev) => ({
-                                  ...prev,
-                                  parcelas: prev.parcelas.map((pp) => pp.numero === p.numero ? { ...pp, valorStr: raw, valor: parseValorDigitado(raw) } : pp),
-                                }));
-                              }}
-                            />
-                          </div>
-                          {idx === crediario.parcelas.length - 1 && crediario.parcelas.length > 1 && (
-                            <button onClick={restoNaUltima} title="Colocar o valor restante nesta parcela" className="shrink-0 text-[9px] font-black uppercase tracking-widest text-violet-300 bg-violet-950/40 border border-violet-900/50 hover:bg-violet-900/40 px-2 py-1.5 rounded-lg active:scale-95">
-                              resto
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                    {/* Validação da soma em tempo real */}
-                    <div className={`px-4 py-3 border-t flex items-center justify-between ${crediarioSomaOk ? 'border-emerald-900/40 bg-emerald-950/20' : 'border-red-900/40 bg-red-950/20'}`}>
-                      <span className={`text-[10px] font-black uppercase tracking-widest ${crediarioSomaOk ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {crediarioSomaOk ? '✓ Soma confere' : `Diferença: ${formatBRL((somaCentsCrediario - totalCentsCrediario) / 100)}`}
-                      </span>
-                      <span className="text-xs font-black text-white">{formatBRL(somaCentsCrediario / 100)} / {formatBRL(totalCentsCrediario / 100)}</span>
-                    </div>
-                  </div>
-
-                  {!crediarioClienteOk && (
-                    <p className="text-[10px] font-black uppercase tracking-widest text-red-400">⚠ Informe o nome da cliente — obrigatório no crediário</p>
-                  )}
+                  <span className="text-xs font-black text-white">
+                    {formatBRL(somaPgtosCents / 100)} / {formatBRL(valorFinalCents / 100)}
+                  </span>
                 </div>
-              )}
+
+                {/* Aviso quando há erro de validação */}
+                {!pagamentoValido.ok && pagamentos.length > 0 && (
+                  <p className="text-[11px] text-amber-400 font-bold">{pagamentoValido.msg}</p>
+                )}
+              </div>
             </div>
             <div className="p-6 bg-slate-950 border-t border-slate-800 shrink-0">
-              <button onClick={confirmarVenda} disabled={loading || (pagamento.metodo === 'crediario' && !crediarioPronto)} className="w-full bg-gradient-to-r from-pink-600 to-pink-500 text-white font-black py-5 rounded-2xl shadow-xl uppercase tracking-widest text-sm hover:brightness-110 transition-all disabled:opacity-50 h-16 active:scale-95">{loading ? 'REGISTRANDO...' : 'CONFIRMAR PAGAMENTO'}</button>
+              <button onClick={confirmarVenda} disabled={loading || !pagamentoValido.ok} className="w-full bg-gradient-to-r from-pink-600 to-pink-500 text-white font-black py-5 rounded-2xl shadow-xl uppercase tracking-widest text-sm hover:brightness-110 transition-all disabled:opacity-50 h-16 active:scale-95">{loading ? 'REGISTRANDO...' : 'CONFIRMAR PAGAMENTO'}</button>
             </div>
           </div>
         </div>
@@ -1461,6 +1647,249 @@ setMostrarSugestoes(false);
       )}
 
       <ReciboModal visivel={mostrarRecibo} dados={dadosRecibo} onClose={() => setMostrarRecibo(false)} />
+    </div>
+  );
+}
+// ============================================================================
+// Subcomponente: card de uma linha de pagamento (Fase 3A)
+// ============================================================================
+// Estrutura de estado e handlers vem do escopo do componente pai
+// (VendaPageInner), passados via props. Mantém EditarPagamentoModal
+// separado — decisão de não extrair componente compartilhado ainda
+// para minimizar risco.
+
+function LinhaPagtoCardVenda({
+  linha,
+  podeRemover,
+  onValorChange,
+  onParcelasCreditoChange,
+  onCredParamChange,
+  onCredParcelaChange,
+  onCredRedistribuir,
+  onCredRestoUltima,
+  onRemover,
+}: {
+  linha: LinhaPagto;
+  podeRemover: boolean;
+  onValorChange: (v: string) => void;
+  onParcelasCreditoChange: (n: number) => void;
+  onCredParamChange: (patch: Partial<LinhaCrediario['crediario']>) => void;
+  onCredParcelaChange: (numero: number, patch: Partial<ParcelaCred>) => void;
+  onCredRedistribuir: () => void;
+  onCredRestoUltima: () => void;
+  onRemover: () => void;
+}) {
+  return (
+    <div className="rounded-2xl border-2 border-slate-800 bg-slate-950 overflow-hidden">
+      {/* Header da linha: forma + valor + remover */}
+      <div className="px-4 py-3 flex items-center gap-3 border-b border-slate-800/50">
+        <span className="text-[11px] font-black uppercase tracking-widest px-2 py-1 rounded bg-slate-800 text-slate-200 min-w-[80px] text-center">
+          {FORMA_LABEL_VENDA[linha.forma]}
+        </span>
+        <div className="flex-1 flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2">
+          <span className="text-sm text-slate-500 font-bold">R$</span>
+          <input
+            type="text"
+            inputMode="decimal"
+            autoComplete="off"
+            className="bg-transparent flex-1 text-lg font-bold text-white outline-none text-right"
+            value={linha.valorStr}
+            onChange={(e) => onValorChange(e.target.value)}
+          />
+        </div>
+        <button
+          onClick={onRemover}
+          disabled={!podeRemover}
+          title={podeRemover ? 'Remover forma' : 'Precisa ter ao menos 1 forma de pagamento'}
+          className={`shrink-0 w-10 h-10 rounded-xl text-base font-black transition ${
+            podeRemover
+              ? 'bg-red-950/40 text-red-400 hover:bg-red-900/40 active:scale-95'
+              : 'bg-slate-900 text-slate-700 cursor-not-allowed'
+          }`}
+        >
+          ×
+        </button>
+      </div>
+
+      {/* Corpo condicional para credito e crediario */}
+      {linha.forma === 'credito' && (
+        <div className="p-4 flex items-center gap-3">
+          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+            Parcelas do cartão
+          </label>
+          <select
+            value={linha.parcelas}
+            onChange={(e) => onParcelasCreditoChange(parseInt(e.target.value))}
+            className="bg-slate-900 border-2 border-slate-800 px-3 py-2 rounded-lg text-white font-bold outline-none focus:border-blue-500 text-sm"
+          >
+            {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>
+                {n}x de {formatBRL(parseValorDigitado(linha.valorStr) / n)}
+                {n === 1 ? ' (À Vista)' : ' (Sem Juros)'}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {linha.forma === 'crediario' && (
+        <CrediarioSectionVenda
+          linha={linha}
+          onParamChange={onCredParamChange}
+          onParcelaChange={onCredParcelaChange}
+          onRedistribuir={onCredRedistribuir}
+          onRestoUltima={onCredRestoUltima}
+        />
+      )}
+    </div>
+  );
+}
+
+function CrediarioSectionVenda({
+  linha,
+  onParamChange,
+  onParcelaChange,
+  onRedistribuir,
+  onRestoUltima,
+}: {
+  linha: LinhaCrediario;
+  onParamChange: (patch: Partial<LinhaCrediario['crediario']>) => void;
+  onParcelaChange: (numero: number, patch: Partial<ParcelaCred>) => void;
+  onRedistribuir: () => void;
+  onRestoUltima: () => void;
+}) {
+  const cred = linha.crediario;
+  const valLinhaCents = Math.round(parseValorDigitado(linha.valorStr) * 100);
+  const somaParcCents = cred.parcelas.reduce((s, p) => s + Math.round(p.valor * 100), 0);
+  const somaOk = valLinhaCents > 0 && somaParcCents === valLinhaCents;
+
+  return (
+    <div className="p-4 space-y-3 bg-slate-950/60">
+      {/* Frequência */}
+      <div className="grid grid-cols-3 gap-2">
+        {(['semanal', 'quinzenal', 'mensal'] as FrequenciaCrediario[]).map((fq) => (
+          <button
+            key={fq}
+            onClick={() => onParamChange({ frequencia: fq })}
+            className={`py-2 rounded-lg text-[10px] font-black uppercase tracking-widest border transition ${
+              cred.frequencia === fq
+                ? 'bg-violet-600 border-violet-500 text-white'
+                : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600'
+            }`}
+          >
+            {FREQ_LABEL[fq]}
+          </button>
+        ))}
+      </div>
+
+      {/* Nº parcelas + primeira data + redistribuir */}
+      <div className="grid grid-cols-[1fr_1fr_auto] gap-2 items-end">
+        <div className="space-y-1">
+          <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
+            Nº parcelas
+          </label>
+          <select
+            value={cred.numParcelas}
+            onChange={(e) => onParamChange({ numParcelas: parseInt(e.target.value) })}
+            className="w-full bg-slate-900 border-2 border-slate-800 px-2 py-2 rounded-lg text-white font-bold outline-none focus:border-violet-500 text-sm"
+          >
+            {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>
+                {n}x
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="space-y-1">
+          <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
+            1ª parcela
+          </label>
+          <input
+            type="date"
+            value={cred.primeiraData}
+            onChange={(e) => e.target.value && onParamChange({ primeiraData: e.target.value })}
+            className="w-full bg-slate-900 border-2 border-slate-800 px-2 py-2 rounded-lg text-white font-bold outline-none focus:border-violet-500 text-sm"
+          />
+        </div>
+        <button
+          onClick={onRedistribuir}
+          className="h-[38px] px-3 rounded-lg text-[10px] font-black uppercase tracking-widest text-violet-400 bg-violet-950/30 border border-violet-900/50 hover:bg-violet-900/40 active:scale-95"
+          title="Gera N parcelas iguais a partir dos parâmetros acima"
+        >
+          ↺ Gerar
+        </button>
+      </div>
+
+      {/* Baixar 1ª parcela */}
+      <label className="flex items-center gap-3 bg-slate-900 border border-slate-800 rounded-lg p-3 cursor-pointer hover:border-slate-600 transition-colors">
+        <input
+          type="checkbox"
+          checked={cred.baixarPrimeira}
+          onChange={(e) => onParamChange({ baixarPrimeira: e.target.checked })}
+          className="w-4 h-4 accent-violet-500 shrink-0"
+        />
+        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-widest">
+          Dar baixa na 1ª parcela agora (paga no ato)
+        </span>
+      </label>
+
+      {/* Lista de parcelas */}
+      {cred.parcelas.length > 0 && (
+        <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+          <div className="max-h-56 overflow-y-auto divide-y divide-slate-800/60">
+            {cred.parcelas.map((p, idx) => (
+              <div key={p.numero} className="flex items-center gap-2 px-3 py-2">
+                <span className="w-6 text-[10px] font-black text-slate-400 shrink-0">
+                  {p.numero}ª
+                </span>
+                <span className="flex-1 text-[10px] font-mono text-slate-300 truncate">
+                  {formatDataCurta(p.data_vencimento)}
+                </span>
+                {idx === 0 && cred.baixarPrimeira && (
+                  <span className="text-[9px] font-black uppercase text-emerald-400 bg-emerald-900/20 border border-emerald-900/30 px-1.5 py-0.5 rounded shrink-0">
+                    paga no ato
+                  </span>
+                )}
+                <div className="flex items-center gap-1 bg-slate-950 border border-slate-700 rounded px-2 shrink-0">
+                  <span className="text-[9px] text-slate-500 font-bold">R$</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    className="bg-transparent w-16 py-1 text-xs font-bold text-white outline-none text-right"
+                    value={p.valorStr}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/[^0-9.,]/g, '');
+                      onParcelaChange(p.numero, { valorStr: raw, valor: parseValorDigitado(raw) });
+                    }}
+                  />
+                </div>
+                {idx === cred.parcelas.length - 1 && cred.parcelas.length > 1 && (
+                  <button
+                    onClick={onRestoUltima}
+                    title="Colocar o restante nesta parcela"
+                    className="shrink-0 text-[8px] font-black uppercase tracking-widest text-violet-300 bg-violet-950/40 border border-violet-900/50 hover:bg-violet-900/40 px-1.5 py-1 rounded active:scale-95"
+                  >
+                    resto
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div
+            className={`px-3 py-1.5 border-t text-[9px] font-black uppercase tracking-widest flex items-center justify-between ${
+              somaOk
+                ? 'border-emerald-900/40 bg-emerald-950/30 text-emerald-400'
+                : 'border-red-900/40 bg-red-950/30 text-red-400'
+            }`}
+          >
+            <span>{somaOk ? '✓ Parcelas OK' : 'Parcelas ≠ valor'}</span>
+            <span className="text-white">
+              {formatBRL(somaParcCents / 100)} / {formatBRL(valLinhaCents / 100)}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
