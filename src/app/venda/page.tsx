@@ -701,6 +701,41 @@ function VendaPageInner() {
     setPagamentos((prev) => prev.filter((l) => l.key !== key));
   }
 
+  // Troca a forma de uma linha existente, preservando o valor digitado.
+  // Bloqueia mudança para crediário se já existir outra linha crediário.
+  function trocarFormaLinha(key: string, novaForma: FormaTodas) {
+    setPagamentos((prev) => {
+      const jaTemOutroCrediario =
+        novaForma === 'crediario' && prev.some((l) => l.key !== key && l.forma === 'crediario');
+      if (jaTemOutroCrediario) return prev;
+
+      return prev.map((l) => {
+        if (l.key !== key) return l;
+        const valorStr = l.valorStr;
+        if (novaForma === 'crediario') {
+          const valor = parseValorDigitado(valorStr);
+          const geradas = gerarParcelasCrediario(valor, 4, hojeISO(), 'quinzenal');
+          return {
+            key: l.key,
+            forma: 'crediario',
+            valorStr,
+            crediario: {
+              frequencia: 'quinzenal',
+              primeiraData: hojeISO(),
+              numParcelas: 4,
+              baixarPrimeira: false,
+              parcelas: geradas.map((g) => ({ ...g, pago: false })),
+            },
+          } as LinhaCrediario;
+        }
+        if (novaForma === 'credito') {
+          return { key: l.key, forma: 'credito', valorStr, parcelas: 1 } as LinhaCredito;
+        }
+        return { key: l.key, forma: novaForma, valorStr } as LinhaSimples;
+      });
+    });
+  }
+
   function atualizarValorLinhaPgto(key: string, valorStr: string) {
     const raw = valorStr.replace(/[^0-9.,]/g, '');
     setPagamentos((prev) =>
@@ -1536,6 +1571,16 @@ setMostrarSugestoes(false);
                     <LinhaPagtoCardVenda
                       key={linha.key}
                       linha={linha}
+                      formasDisponiveis={
+                        // Se essa linha já é crediário, todas as opções continuam disponíveis (inclusive continuar crediário).
+                        // Caso contrário, esconde crediário se JÁ existe outra linha crediário na venda.
+                        linha.forma === 'crediario'
+                          ? (['pix', 'dinheiro', 'debito', 'credito', 'crediario'] as FormaTodas[])
+                          : temCrediario
+                            ? (['pix', 'dinheiro', 'debito', 'credito'] as FormaTodas[])
+                            : (['pix', 'dinheiro', 'debito', 'credito', 'crediario'] as FormaTodas[])
+                      }
+                      onFormaChange={(nova) => trocarFormaLinha(linha.key, nova)}
                       onValorChange={(v) => atualizarValorLinhaPgto(linha.key, v)}
                       onParcelasCreditoChange={(n) => atualizarParcelasCreditoLinha(linha.key, n)}
                       onCredParamChange={(patch) => atualizarCredParamLinha(linha.key, patch)}
@@ -1661,6 +1706,8 @@ setMostrarSugestoes(false);
 function LinhaPagtoCardVenda({
   linha,
   podeRemover,
+  formasDisponiveis,
+  onFormaChange,
   onValorChange,
   onParcelasCreditoChange,
   onCredParamChange,
@@ -1671,6 +1718,8 @@ function LinhaPagtoCardVenda({
 }: {
   linha: LinhaPagto;
   podeRemover: boolean;
+  formasDisponiveis: FormaTodas[];
+  onFormaChange: (nova: FormaTodas) => void;
   onValorChange: (v: string) => void;
   onParcelasCreditoChange: (n: number) => void;
   onCredParamChange: (patch: Partial<LinhaCrediario['crediario']>) => void;
@@ -1681,30 +1730,52 @@ function LinhaPagtoCardVenda({
 }) {
   return (
     <div className="rounded-2xl border-2 border-slate-800 bg-slate-950 overflow-hidden">
-      {/* Header da linha: forma + valor + remover */}
-      <div className="px-4 py-3 flex items-center gap-3 border-b border-slate-800/50">
-        <span className="text-[11px] font-black uppercase tracking-widest px-2 py-1 rounded bg-slate-800 text-slate-200 min-w-[80px] text-center">
-          {FORMA_LABEL_VENDA[linha.forma]}
-        </span>
-        <div className="flex-1 flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2">
-          <span className="text-sm text-slate-500 font-bold">R$</span>
+      {/* Header da linha: seletor de forma + valor + remover */}
+      <div className="px-3 py-3 flex items-center gap-2 border-b border-slate-800/50">
+        {/* Seletor de forma — clicável, permite trocar sem remover a linha */}
+        <div className="relative shrink-0">
+          <select
+            value={linha.forma}
+            onChange={(e) => onFormaChange(e.target.value as FormaTodas)}
+            className="appearance-none bg-slate-800 text-slate-100 text-[11px] font-black uppercase tracking-widest pl-3 pr-7 py-2 rounded-lg border-2 border-slate-700 outline-none focus:border-pink-500 cursor-pointer min-w-[100px]"
+          >
+            {formasDisponiveis.map((f) => (
+              <option key={f} value={f}>{FORMA_LABEL_VENDA[f]}</option>
+            ))}
+          </select>
+          {/* Seta indicativa para deixar claro que é clicável */}
+          <svg
+            className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none"
+            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"
+            style={{ color: '#94a3b8' }}
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+
+        {/* Campo de valor */}
+        <div className="flex-1 min-w-0 flex items-center gap-1.5 bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2">
+          <span className="text-xs text-slate-500 font-bold shrink-0">R$</span>
           <input
             type="text"
             inputMode="decimal"
             autoComplete="off"
-            className="bg-transparent flex-1 text-lg font-bold text-white outline-none text-right"
+            className="bg-transparent flex-1 min-w-0 text-base font-bold text-white outline-none text-right"
             value={linha.valorStr}
             onChange={(e) => onValorChange(e.target.value)}
           />
         </div>
+
+        {/* Botão remover — cor mais vibrante e sempre com espaço reservado */}
         <button
           onClick={onRemover}
           disabled={!podeRemover}
           title={podeRemover ? 'Remover forma' : 'Precisa ter ao menos 1 forma de pagamento'}
-          className={`shrink-0 w-10 h-10 rounded-xl text-base font-black transition ${
+          aria-label="Remover forma"
+          className={`shrink-0 w-9 h-9 rounded-xl text-lg font-black transition border-2 flex items-center justify-center ${
             podeRemover
-              ? 'bg-red-950/40 text-red-400 hover:bg-red-900/40 active:scale-95'
-              : 'bg-slate-900 text-slate-700 cursor-not-allowed'
+              ? 'bg-red-500/15 border-red-500/50 text-red-400 hover:bg-red-500/25 active:scale-95'
+              : 'bg-slate-900 border-slate-800 text-slate-700 cursor-not-allowed'
           }`}
         >
           ×
