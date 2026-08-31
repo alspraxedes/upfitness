@@ -1,12 +1,13 @@
 // src/app/page.tsx
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
 import Image from 'next/image';
 import { getSignedUrlCached } from '../lib/signedUrlCache';
+import { adicionarAoRascunhoLocal, type ItemCarrinho } from '../lib/carrinho';
 
 // --- UTILITÁRIOS ---
 function formatBRL(v: any) {
@@ -203,6 +204,155 @@ function getSwatchStyle(raw: string | null | undefined) {
 
 type Anchor = { id: string; top: number };
 
+// ============================================================================
+// SwipeableCard — envolve um card do estoque e detecta arrasto para a
+// esquerda. Se ultrapassar o threshold, dispara onSwipeAction (que abre o
+// bottom sheet de seleção de tamanho). Se não ultrapassar, volta pra
+// posição. Um clique/tap simples continua funcionando normalmente (só é
+// intercepetado se realmente houve arrasto significativo).
+//
+// Funciona com pointer events (touch + mouse) e ignora arrastos que
+// começam vertical (usuária scrollando a página).
+// ============================================================================
+type SwipeableCardProps = {
+  children: React.ReactNode;
+  onSwipeAction: () => void;
+  disabled?: boolean;
+};
+function SwipeableCard({ children, onSwipeAction, disabled }: SwipeableCardProps) {
+  const [dragX, setDragX] = useState(0);
+  const [snapping, setSnapping] = useState(false);
+  const [triggered, setTriggered] = useState(false);
+  const startRef = useRef<{ x: number; y: number; time: number; locked: 'x' | 'y' | null } | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const lastSwipeAtRef = useRef(0);
+
+  // Threshold: 35% da largura do card ou 110px, o que for menor.
+  const getThreshold = () => {
+    const w = containerRef.current?.offsetWidth ?? 320;
+    return Math.min(w * 0.35, 110);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (disabled) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    startRef.current = { x: e.clientX, y: e.clientY, time: Date.now(), locked: null };
+    setSnapping(false);
+    setTriggered(false);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!startRef.current || disabled) return;
+    const dx = e.clientX - startRef.current.x;
+    const dy = e.clientY - startRef.current.y;
+
+    // Decide na largada se é gesto horizontal (swipe) ou vertical (scroll)
+    if (!startRef.current.locked) {
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      startRef.current.locked = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    }
+    if (startRef.current.locked === 'y') return;
+
+    // Só interessa esquerda; à direita trava em 0 com um pouco de folga
+    if (dx > 20) {
+      setDragX(20);
+      return;
+    }
+    // Captura pointer para continuar recebendo eventos se sair do card
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
+    setDragX(dx);
+  };
+
+  const finalizar = () => {
+    if (!startRef.current) return;
+    const wasHorizontal = startRef.current.locked === 'x';
+    const passedThreshold = wasHorizontal && dragX < -getThreshold();
+    startRef.current = null;
+
+    if (passedThreshold) {
+      lastSwipeAtRef.current = Date.now();
+      setTriggered(true);
+      // Snap para posição "acionada" e dispara ação; depois volta ao 0
+      setSnapping(true);
+      setDragX(0);
+      setTimeout(() => {
+        onSwipeAction();
+        setTriggered(false);
+      }, 150);
+    } else {
+      setSnapping(true);
+      setDragX(0);
+    }
+  };
+
+  const handlePointerUp = () => finalizar();
+  const handlePointerCancel = () => finalizar();
+
+  // Se um swipe acabou de acontecer, engolir o click sintético que o
+  // navegador emite depois do pointerup (senão o Link do card
+  // navegaria para /item/:id ao mesmo tempo).
+  const handleClickCapture = (e: React.MouseEvent) => {
+    if (Date.now() - lastSwipeAtRef.current < 400) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+
+  const revealed = Math.min(Math.abs(Math.min(dragX, 0)), 140);
+  const passingThreshold = revealed >= 100;
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative rounded-[2.5rem] overflow-hidden touch-pan-y select-none"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onClickCapture={handleClickCapture}
+      style={{ touchAction: 'pan-y' }}
+    >
+      {/* Fundo revelado à direita ao arrastar */}
+      <div
+        aria-hidden
+        className={`absolute inset-y-0 right-0 flex items-center justify-end pr-6 rounded-[2.5rem] transition-colors ${
+          passingThreshold ? 'bg-emerald-600' : 'bg-pink-600'
+        }`}
+        style={{ width: `${revealed}px`, opacity: revealed > 4 ? 1 : 0 }}
+      >
+        <div className="flex items-center gap-2 text-white font-black uppercase text-[11px] tracking-widest">
+          {passingThreshold ? (
+            <>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-5 h-5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+              </svg>
+              <span>Soltar</span>
+            </>
+          ) : (
+            <>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-5 h-5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 3h1.386c.51 0 .955.343 1.087.835l.383 1.437M7.5 14.25a3 3 0 00-3 3h15.75m-12.75-3h11.218c1.121-2.3 2.1-4.684 2.924-7.138a60.114 60.114 0 00-16.536-1.84M7.5 14.25L5.106 5.272" />
+              </svg>
+              <span>Add</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Card em si, com transform */}
+      <div
+        className={triggered || snapping ? 'transition-transform duration-200' : ''}
+        style={{ transform: `translateX(${dragX}px)` }}
+        onTransitionEnd={() => setSnapping(false)}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+
 export default function Dashboard() {
   const router = useRouter();
 
@@ -228,6 +378,65 @@ export default function Dashboard() {
 
   const dataFetchedRef = useRef(false);
   const restoredScrollRef = useRef(false);
+
+  // --- Swipe-to-add: bottom sheet de seleção de tamanho + toast ---
+  const [swipeProduto, setSwipeProduto] = useState<any | null>(null);
+  const [swipeToast, setSwipeToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const swipeToastTimeoutRef = useRef<number | null>(null);
+
+  const mostrarToast = useCallback((msg: string, ok: boolean) => {
+    setSwipeToast({ msg, ok });
+    if (swipeToastTimeoutRef.current) window.clearTimeout(swipeToastTimeoutRef.current);
+    swipeToastTimeoutRef.current = window.setTimeout(() => setSwipeToast(null), 2600);
+  }, []);
+
+  // Adiciona um estoque específico (produto + tamanho) ao rascunho local.
+  // Reaproveita a lib compartilhada com a tela /venda.
+  const adicionarEstoqueAoRascunho = useCallback(
+    (produto: any, est: any) => {
+      const custoBase = (Number(produto.preco_compra) || 0) + (Number(produto.custo_frete) || 0) + (Number(produto.custo_embalagem) || 0);
+      const item: Omit<ItemCarrinho, 'tempId' | 'qtd'> = {
+        produto_id: produto.id,
+        estoque_id: est.id,
+        descricao: produto.descricao,
+        cor: produto.cor || '',
+        tamanho: est.tamanho?.nome || '',
+        preco: Number(produto.preco_venda) || 0,
+        custo: custoBase,
+        maxEstoque: Number(est.quantidade) || 0,
+        foto: produto.foto_url ?? null,
+        ean: est.codigo_barras ?? null,
+      };
+      const resultado = adicionarAoRascunhoLocal(item);
+      if (resultado.ok === true) {
+        const rotulo = `${produto.descricao} • ${est.tamanho?.nome ?? ''}`.trim();
+        const acao = resultado.jaExistia ? `+1 (agora ${resultado.novaQtd})` : 'adicionada';
+        mostrarToast(`${rotulo} ${acao}. Carrinho: ${resultado.totalItens} ${resultado.totalItens === 1 ? 'item' : 'itens'}`, true);
+      } else {
+        mostrarToast(resultado.mensagem, false);
+      }
+    },
+    [mostrarToast],
+  );
+
+  // Handler chamado quando um card conclui o swipe. Se o produto tem
+  // exatamente um tamanho com estoque, adiciona direto sem abrir o
+  // bottom sheet (atalho pra economizar um toque).
+  const handleSwipeAdd = useCallback(
+    (produto: any) => {
+      const comEstoque = (produto.estoque || []).filter((e: any) => (Number(e.quantidade) || 0) > 0);
+      if (comEstoque.length === 0) {
+        mostrarToast('Sem estoque para adicionar ao carrinho.', false);
+        return;
+      }
+      if (comEstoque.length === 1) {
+        adicionarEstoqueAoRascunho(produto, comEstoque[0]);
+        return;
+      }
+      setSwipeProduto(produto);
+    },
+    [adicionarEstoqueAoRascunho, mostrarToast],
+  );
 
   // Scanner: evita importar html5-qrcode no topo
   const scannerRef = useRef<any>(null);
@@ -335,8 +544,8 @@ export default function Dashboard() {
       .from('produtos')
       .select(
         `
-        id, codigo_peca, sku_fornecedor, fornecedor, descricao, cor, foto_url, preco_venda, created_at,
-        estoque ( quantidade, codigo_barras, tamanho:tamanhos ( nome, ordem ) )
+        id, codigo_peca, sku_fornecedor, fornecedor, descricao, cor, foto_url, preco_venda, preco_compra, custo_frete, custo_embalagem, created_at,
+        estoque ( id, quantidade, codigo_barras, tamanho:tamanhos ( nome, ordem ) )
       `
       )
       .eq('descontinuado', false)
@@ -825,9 +1034,9 @@ export default function Dashboard() {
               const swatch = getSwatchStyle(produto.cor);
 
               return (
+                <SwipeableCard key={produto.id} onSwipeAction={() => handleSwipeAdd(produto)}>
                 <Link
                   href={itemHref}
-                  key={produto.id}
                   id={`produto-${produto.id}`}
                   onClick={() => saveReturnState(produto.id)}
                   onMouseDown={() => saveReturnState(produto.id)}
@@ -900,6 +1109,7 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </Link>
+                </SwipeableCard>
               );
             })
           )}
@@ -1136,6 +1346,87 @@ export default function Dashboard() {
                 </button>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* BOTTOM SHEET DE TAMANHO (swipe do card) --------------------- */}
+      {swipeProduto && (
+        <div
+          className="fixed inset-0 z-[130] bg-slate-950/85 backdrop-blur-xl flex items-end md:items-center justify-center animate-in fade-in duration-150"
+          onClick={() => setSwipeProduto(null)}
+        >
+          <div
+            className="bg-slate-900 w-full max-w-md rounded-t-[2rem] md:rounded-[2rem] border-t md:border border-slate-800 shadow-2xl p-6 flex flex-col gap-4 max-h-[90vh]"
+            style={{ paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + 1.5rem)` }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-[10px] font-black uppercase tracking-widest text-pink-500">Adicionar ao carrinho</p>
+                <h3 className="text-white font-black text-base uppercase truncate mt-0.5">{swipeProduto.descricao}</h3>
+                <p className="text-[11px] text-slate-400 font-bold uppercase truncate">{swipeProduto.cor}</p>
+              </div>
+              <button
+                onClick={() => setSwipeProduto(null)}
+                className="shrink-0 w-9 h-9 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center hover:bg-slate-700 active:scale-95"
+                aria-label="Fechar"
+              >✕</button>
+            </div>
+
+            <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Escolha o tamanho</p>
+
+            <div className="grid grid-cols-3 gap-2 overflow-y-auto">
+              {(swipeProduto.estoque || []).map((est: any, i: number) => {
+                const disponivel = (Number(est.quantidade) || 0) > 0;
+                return (
+                  <button
+                    key={est.id ?? i}
+                    disabled={!disponivel}
+                    onClick={() => {
+                      adicionarEstoqueAoRascunho(swipeProduto, est);
+                      setSwipeProduto(null);
+                    }}
+                    className={`p-3 rounded-2xl border-2 font-black uppercase transition-all active:scale-95 flex flex-col items-center gap-0.5 ${
+                      disponivel
+                        ? 'bg-slate-950 border-slate-800 hover:border-pink-500 text-white'
+                        : 'bg-transparent border-slate-800 text-slate-700 border-dashed cursor-not-allowed'
+                    }`}
+                  >
+                    <span className="text-base">{est.tamanho?.nome}</span>
+                    <span className={`text-[9px] tracking-widest ${disponivel ? 'text-emerald-400' : 'text-slate-700'}`}>
+                      {disponivel ? `${est.quantidade} em estoque` : 'zerado'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <Link
+              href="/venda"
+              className="mt-2 text-center text-[11px] font-black uppercase tracking-widest text-pink-500 hover:text-pink-400 py-2"
+            >
+              Ir para o carrinho →
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {/* TOAST de feedback do swipe ---------------------------------- */}
+      {swipeToast && (
+        <div
+          className="fixed left-4 right-4 z-[140] flex justify-center pointer-events-none animate-in fade-in slide-in-from-bottom-4 duration-200"
+          style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + 108px)` }}
+        >
+          <div
+            className={`pointer-events-auto max-w-md w-full rounded-2xl px-4 py-3 shadow-2xl border font-bold text-sm flex items-start gap-3 ${
+              swipeToast.ok
+                ? 'bg-emerald-600 border-emerald-400 text-white'
+                : 'bg-red-600 border-red-400 text-white'
+            }`}
+          >
+            <span className="text-lg leading-none">{swipeToast.ok ? '✓' : '⚠'}</span>
+            <span className="flex-1">{swipeToast.msg}</span>
           </div>
         </div>
       )}

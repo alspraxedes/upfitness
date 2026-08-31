@@ -8,6 +8,7 @@ import Cropper from 'react-easy-crop';
 import { useSearchParams } from 'next/navigation';
 import { gerarThumb, thumbPathFromOriginal } from '../../lib/thumbUtils';
 import { playBeep } from '../../lib/sound';
+import { RASCUNHO_LOCAL_KEY, type ItemCarrinho } from '../../lib/carrinho';
 
 import ReciboModal from '../components/ReciboModal';
 
@@ -33,20 +34,7 @@ type Produto = {
   estoque: EstoqueItem[];
 };
 
-type ItemCarrinho = {
-  tempId: string;
-  produto_id: string;
-  estoque_id: string;
-  descricao: string;
-  cor: string;
-  tamanho: string;
-  preco: number;
-  custo: number;
-  qtd: number;
-  maxEstoque: number;
-  foto: string | null;
-  ean: string | null;
-};
+// (tipo ItemCarrinho agora vem de src/lib/carrinho.ts, importado no topo)
 
 type AreaCrop = { x: number; y: number; width: number; height: number };
 
@@ -322,6 +310,73 @@ function VendaPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // --- PERSISTÊNCIA LOCAL DO CARRINHO EM MONTAGEM ---
+  // Ao sair da página e voltar (ou reabrir o PWA), a usuária retoma o
+  // carrinho exatamente de onde parou. Só é limpo quando a venda é
+  // finalizada ou quando ela esvazia o carrinho manualmente.
+  const rascunhoRestauradoRef = useRef(false);
+
+  // RESTAURA: espera produtos carregarem para revalidar maxEstoque
+  // (estoque pode ter mudado enquanto ela estava fora da página).
+  useEffect(() => {
+    if (rascunhoRestauradoRef.current) return;
+    if (produtos.length === 0) return;
+    rascunhoRestauradoRef.current = true;
+    try {
+      const raw = localStorage.getItem(RASCUNHO_LOCAL_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        carrinho?: ItemCarrinho[];
+        draftAtualId?: string | null;
+        draftAtualTitulo?: string;
+      };
+      if (!parsed?.carrinho || parsed.carrinho.length === 0) {
+        // Estado salvo mas vazio: só restaura o vínculo de draft se houver
+        if (parsed?.draftAtualId) {
+          setDraftAtualId(parsed.draftAtualId);
+          setDraftAtualTitulo(parsed.draftAtualTitulo ?? '');
+        }
+        return;
+      }
+      // Rehidrata maxEstoque de cada item com base no estoque atual.
+      // Itens cujo produto/estoque não existe mais viram maxEstoque=0
+      // e a UI já sinaliza como zerado (bloqueando o fechamento da venda
+      // até ela removê-los), reaproveitando a validação que já existe.
+      const carrinhoRehidratado: ItemCarrinho[] = parsed.carrinho.map((it) => {
+        const p = produtos.find((pp) => pp.id === it.produto_id);
+        const est = p?.estoque.find((e) => e.id === it.estoque_id);
+        return { ...it, maxEstoque: est?.quantidade ?? 0 };
+      });
+      setCarrinho(carrinhoRehidratado);
+      if (parsed.draftAtualId) setDraftAtualId(parsed.draftAtualId);
+      if (parsed.draftAtualTitulo) setDraftAtualTitulo(parsed.draftAtualTitulo);
+    } catch {
+      // JSON corrompido, quota, modo privado — ignora e segue com carrinho vazio
+    }
+  }, [produtos]);
+
+  // SALVA: dispara em cada mudança do carrinho, do vínculo de draft ou
+  // do título do draft. Só começa a salvar DEPOIS do restore inicial
+  // para não sobrescrever o estado salvo com o vazio inicial do state.
+  useEffect(() => {
+    if (!rascunhoRestauradoRef.current) return;
+    try {
+      if (carrinho.length === 0 && !draftAtualId) {
+        localStorage.removeItem(RASCUNHO_LOCAL_KEY);
+        return;
+      }
+      const payload = {
+        carrinho,
+        draftAtualId,
+        draftAtualTitulo,
+        savedAt: Date.now(),
+      };
+      localStorage.setItem(RASCUNHO_LOCAL_KEY, JSON.stringify(payload));
+    } catch {
+      // quota exceeded, modo privado, etc. — falha silenciosa, não bloqueia UI
+    }
+  }, [carrinho, draftAtualId, draftAtualTitulo]);
+
   const produtosDisponiveis = useMemo(() => {
     return produtos.filter((p) => {
       const total = p.estoque.reduce((acc, est) => acc + (Number(est.quantidade) || 0), 0);
@@ -332,13 +387,23 @@ function VendaPageInner() {
   const produtosVisiveis = useMemo(() => {
     const q = busca.toLowerCase().trim();
     if (!q) return produtosDisponiveis;
+    // Cada termo digitado precisa aparecer em algum dos campos (descrição, código,
+    // SKU, cor ou EAN). Isso permite buscas compostas tipo "calça preta" ou
+    // "regata M" sem depender da ordem que aparece no cadastro.
+    const termos = q.split(/\s+/).filter(Boolean);
     return produtosDisponiveis.filter((p) => {
-      const matchTexto =
-        (p.descricao || '').toLowerCase().includes(q) ||
-        (p.codigo_peca || '').toLowerCase().includes(q) ||
-        (p.sku_fornecedor || '').toLowerCase().includes(q);
-      const matchEan = p.estoque.some((e) => (e.codigo_barras || '').includes(q));
-      return matchTexto || matchEan;
+      const descricao = (p.descricao || '').toLowerCase();
+      const codigo = (p.codigo_peca || '').toLowerCase();
+      const sku = (p.sku_fornecedor || '').toLowerCase();
+      const cor = (p.cor || '').toLowerCase();
+      return termos.every((t) => {
+        if (descricao.includes(t)) return true;
+        if (codigo.includes(t)) return true;
+        if (sku.includes(t)) return true;
+        if (cor.includes(t)) return true;
+        if (p.estoque.some((e) => (e.codigo_barras || '').includes(t))) return true;
+        return false;
+      });
     });
   }, [busca, produtosDisponiveis]);
 
@@ -1070,7 +1135,7 @@ setMostrarSugestoes(false);
   const bgClass = isEditandoDraft ? 'bg-gradient-to-br from-orange-950 via-amber-950 to-slate-950' : 'bg-slate-950';
 
   return (
-    <div className={`min-h-screen ${bgClass} text-slate-100 font-sans flex flex-col md:flex-row overflow-hidden relative`}>
+    <div className={`min-h-screen ${bgClass} text-slate-100 font-sans flex flex-col md:flex-row md:overflow-hidden relative`}>
       {isEditandoDraft && (
         <div className="pointer-events-none absolute inset-0 z-0">
           <div className="absolute inset-0 opacity-[0.10]"></div>
@@ -1079,7 +1144,7 @@ setMostrarSugestoes(false);
       <div id="reader-hidden" className="hidden"></div>
 
       {/* ÁREA ESQUERDA: BUSCA */}
-      <div className={`relative z-10 flex-1 p-4 md:p-6 flex flex-col gap-4 h-[calc(100vh-80px)] md:h-screen overflow-y-auto ${abaMobile === 'carrinho' ? 'hidden md:flex' : 'flex'}`}>
+      <div className={`relative z-10 flex-1 px-4 pt-4 pb-[calc(env(safe-area-inset-bottom,0px)+8rem)] md:p-6 flex flex-col gap-4 md:h-screen md:overflow-y-auto ${abaMobile === 'carrinho' ? 'hidden md:flex' : 'flex'}`}>
         <header className="flex items-center gap-4">
           <Link href={`/${dashQS}`} className="bg-slate-800 p-3 rounded-full hover:bg-slate-700 transition active:scale-95">←</Link>
           <h1 className="font-black italic text-xl uppercase">UpFitness <span className="font-light text-pink-500">Checkout</span></h1>
@@ -1102,7 +1167,7 @@ setMostrarSugestoes(false);
         )}
 
         <div className="relative z-30 flex flex-col gap-3">
-          <input autoFocus type="text" placeholder="🔎 Buscar, SKU ou EAN..." className="w-full p-4 rounded-2xl bg-slate-900 border-2 border-slate-800 focus:border-pink-500 outline-none text-base font-bold shadow-xl text-white h-16" value={busca} onChange={(e) => setBusca(e.target.value)} onKeyDown={handleKeyDownBusca} />
+          <input autoFocus type="text" placeholder="🔎 Nome, cor, SKU ou EAN..." className="w-full p-4 rounded-2xl bg-slate-900 border-2 border-slate-800 focus:border-pink-500 outline-none text-base font-bold shadow-xl text-white h-16" value={busca} onChange={(e) => setBusca(e.target.value)} onKeyDown={handleKeyDownBusca} />
           <div className="flex gap-3">
             <button onClick={() => setMostrarScanner(true)} className="flex-1 bg-slate-800 hover:bg-slate-700 text-white h-14 rounded-2xl flex items-center justify-center text-sm font-bold uppercase tracking-widest border-2 border-slate-800 hover:border-pink-500 transition-all shadow-xl active:scale-95 gap-2">
               📷 <span className="hidden min-[350px]:inline">Câmera</span>
@@ -1118,7 +1183,7 @@ setMostrarSugestoes(false);
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Itens disponíveis</span>
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">{produtosVisiveis.length} itens</span>
             </div>
-            <div className="max-h-[55vh] overflow-y-auto">
+            <div className="md:max-h-[55vh] md:overflow-y-auto">
               {produtosVisiveis.length === 0 ? (
                 <div className="p-6 text-center text-slate-500 text-xs font-bold uppercase tracking-widest">Nenhum item encontrado</div>
               ) : (
@@ -1142,14 +1207,6 @@ setMostrarSugestoes(false);
               )}
             </div>
           </div>
-        </div>
-
-        <div className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-800 p-4 pb-8 flex items-center justify-between shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-20" onClick={() => setAbaMobile('carrinho')}>
-          <div className="flex flex-col">
-            <span className="text-[10px] text-slate-500 font-bold uppercase">Total ({qtdItensCarrinho} itens)</span>
-            <span className="text-2xl font-black text-white">{formatBRL(totalBruto)}</span>
-          </div>
-          <button className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95">Ver Carrinho →</button>
         </div>
       </div>
 
@@ -1688,6 +1745,24 @@ setMostrarSugestoes(false);
               <button onClick={processarRecorte} disabled={lendoArquivo} className="flex-1 bg-pink-600 text-white py-4 rounded-2xl font-black uppercase shadow-xl">{lendoArquivo ? 'Lendo...' : 'Confirmar'}</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* BARRA FIXA "VER CARRINHO" — filha DIRETA do wrapper raiz pra
+          garantir que position: fixed ancore no viewport, sem risco de
+          algum ancestral (transform, filter, contain) virar containing
+          block e transformá-la em absolute. Só aparece no mobile e na
+          aba de busca. */}
+      {abaMobile === 'busca' && (
+        <div
+          className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-800 px-4 pt-3 pb-[calc(env(safe-area-inset-bottom,0px)+12px)] flex items-center justify-between shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-40"
+          onClick={() => setAbaMobile('carrinho')}
+        >
+          <div className="flex flex-col">
+            <span className="text-[10px] text-slate-500 font-bold uppercase">Total ({qtdItensCarrinho} itens)</span>
+            <span className="text-2xl font-black text-white">{formatBRL(totalBruto)}</span>
+          </div>
+          <button className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95">Ver Carrinho →</button>
         </div>
       )}
 
