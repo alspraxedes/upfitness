@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { supabase } from '../../../lib/supabase';
 import { getSignedUrlCached } from '../../../lib/signedUrlCache';
 import { gerarThumb, thumbPathFromOriginal, extractStoragePath } from '../../../lib/thumbUtils';
+import PhotoLightbox from '../../components/PhotoLightbox';
 
 // --- UTILITÁRIOS ---
 const formatBRL = (val: number | string) => {
@@ -84,6 +85,11 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
   const [produto, setProduto] = useState<any>(null);
   const [listaTamanhos, setListaTamanhos] = useState<any[]>([]);
   const [signedUrl, setSignedUrl] = useState<string | null>(null);
+  const [lightboxAberta, setLightboxAberta] = useState(false);
+  const [lightboxIndice, setLightboxIndice] = useState(0);
+  // URLs assinadas de TODAS as fotos do produto (pra exibir miniaturas
+  // no cabeçalho). Chave: path/url original; valor: URL assinada.
+  const [fotosSignedMap, setFotosSignedMap] = useState<Record<string, string>>({});
 
   // Download UI
   const [downloadingFoto, setDownloadingFoto] = useState(false);
@@ -187,6 +193,71 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
     setLoading(false);
   }
 
+  // --- FOTOS MÚLTIPLAS ---
+  // Deriva a lista efetiva de fotos: usa `fotos` (novo) se preenchido,
+  // senão cai em [foto_url] (produtos ainda não migrados). A ordem da
+  // lista é a ordem de exibição; a primeira é a "principal".
+  const fotosEfetivas: string[] = useMemo(() => {
+    if (!produto) return [];
+    if (Array.isArray(produto.fotos) && produto.fotos.length > 0) return produto.fotos;
+    if (produto.foto_url) return [produto.foto_url];
+    return [];
+  }, [produto]);
+
+  // Assina TODAS as fotos do produto (usa cache global — barato).
+  useEffect(() => {
+    if (fotosEfetivas.length === 0) return;
+    let cancelado = false;
+    (async () => {
+      const novas: Record<string, string> = {};
+      for (const bruta of fotosEfetivas) {
+        if (fotosSignedMap[bruta]) continue;
+        try {
+          const url = await getSignedUrlCached('produtos', bruta, extractPath, 3600);
+          if (url) novas[bruta] = url;
+        } catch {}
+      }
+      if (!cancelado && Object.keys(novas).length > 0) {
+        setFotosSignedMap((prev) => ({ ...prev, ...novas }));
+      }
+    })();
+    return () => {
+      cancelado = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fotosEfetivas]);
+
+  // Persiste um novo array de fotos no banco, mantendo foto_url = fotos[0]
+  // (retrocompatibilidade com telas que ainda leem só foto_url).
+  const salvarNovoArrayFotos = async (novasFotos: string[]) => {
+    const principal = novasFotos[0] ?? null;
+    const { error } = await supabase
+      .from('produtos')
+      .update({ fotos: novasFotos, foto_url: principal })
+      .eq('id', id);
+    if (error) {
+      alert('Erro ao salvar fotos: ' + error.message);
+      return false;
+    }
+    await carregarDados();
+    return true;
+  };
+
+  const removerFoto = async (index: number) => {
+    if (!editando) return;
+    if (!confirm('Remover esta foto? (A foto continua no storage, apenas some do produto)')) return;
+    const novas = fotosEfetivas.filter((_, i) => i !== index);
+    await salvarNovoArrayFotos(novas);
+  };
+
+  const moverFoto = async (index: number, direcao: -1 | 1) => {
+    const alvo = index + direcao;
+    if (alvo < 0 || alvo >= fotosEfetivas.length) return;
+    const novas = [...fotosEfetivas];
+    [novas[index], novas[alvo]] = [novas[alvo], novas[index]];
+    await salvarNovoArrayFotos(novas);
+  };
+
   // --- DOWNLOAD FOTO ORIGINAL (via Storage, se possível) ---
   const baixarFotoOriginal = async () => {
     if (!produto?.foto_url) return;
@@ -253,7 +324,26 @@ const uploadFoto = async (file: File) => {
     // Upload da foto original
     await supabase.storage.from('produtos').upload(path, file);
     const { data } = supabase.storage.from('produtos').getPublicUrl(path);
-    await supabase.from('produtos').update({ foto_url: data.publicUrl }).eq('id', id);
+
+    // Append no array de fotos. A nova foto entra no final da lista;
+    // a primeira do array continua sendo a "principal" (foto_url).
+    // Se o produto ainda não tem nenhuma foto, esta vira a principal.
+    const atuaisResp = await supabase
+      .from('produtos')
+      .select('fotos, foto_url')
+      .eq('id', id)
+      .single();
+    const atuais: string[] =
+      Array.isArray(atuaisResp.data?.fotos) && atuaisResp.data!.fotos.length > 0
+        ? atuaisResp.data!.fotos
+        : atuaisResp.data?.foto_url
+          ? [atuaisResp.data.foto_url]
+          : [];
+    const novasFotos = [...atuais, data.publicUrl];
+    await supabase
+      .from('produtos')
+      .update({ fotos: novasFotos, foto_url: novasFotos[0] })
+      .eq('id', id);
 
     // Gera e faz upload da thumb (não bloqueia se falhar)
     try {
@@ -644,48 +734,155 @@ const uploadFoto = async (file: File) => {
           )}
         </div>
 
-        {/* IDENTIFICAÇÃO E FOTO */}
+        {/* IDENTIFICAÇÃO E FOTOS */}
         <section className="bg-slate-900 p-6 rounded-[2rem] border border-slate-800 shadow-xl flex flex-col md:flex-row gap-6">
-          <div className="shrink-0 flex justify-center">
-            <div className="relative">
-              <button
-                onClick={() => editando && setModalFoto(true)}
-                className={`w-32 h-32 rounded-3xl bg-slate-950 border-2 border-slate-700 overflow-hidden relative group shadow-lg ${
-                  editando ? 'cursor-pointer hover:border-pink-500' : 'cursor-default'
-                }`}
-              >
-                {signedUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={signedUrl} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" alt="" />
-                ) : (
-                  <span className="text-4xl opacity-30">📷</span>
+          <div className="shrink-0 w-full md:w-auto">
+            {/* Foto principal grande (primeira do array) */}
+            <div className="flex justify-center md:block">
+              <div className="relative">
+                <button
+                  onClick={() => {
+                    if (editando) setModalFoto(true);
+                    else if (fotosEfetivas.length > 0) {
+                      setLightboxIndice(0);
+                      setLightboxAberta(true);
+                    }
+                  }}
+                  className={`w-32 h-32 rounded-3xl bg-slate-950 border-2 border-slate-700 overflow-hidden relative group shadow-lg ${
+                    editando
+                      ? 'cursor-pointer hover:border-pink-500'
+                      : fotosEfetivas.length > 0
+                        ? 'cursor-zoom-in hover:border-slate-600'
+                        : 'cursor-default'
+                  }`}
+                >
+                  {fotosEfetivas[0] && fotosSignedMap[fotosEfetivas[0]] ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={fotosSignedMap[fotosEfetivas[0]]} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" alt="" />
+                  ) : (
+                    <span className="text-4xl opacity-30">📷</span>
+                  )}
+
+                  {editando && (
+                    <div className="absolute bottom-0 inset-x-0 bg-black/70 py-1 flex items-center justify-center gap-1 backdrop-blur-sm animate-in fade-in">
+                      <span className="text-[10px] text-white font-bold uppercase tracking-wide">📷 Adicionar</span>
+                    </div>
+                  )}
+
+                  {/* Contador de fotos no canto (só se >1) */}
+                  {!editando && fotosEfetivas.length > 1 && (
+                    <div className="absolute bottom-1 right-1 bg-slate-950/85 backdrop-blur border border-slate-700 rounded-full px-2 py-0.5 text-[9px] font-black text-white uppercase tracking-wider">
+                      1/{fotosEfetivas.length}
+                    </div>
+                  )}
+                </button>
+
+                {!!produto?.foto_url && !editando && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      baixarFotoOriginal();
+                    }}
+                    title={downloadingFoto ? 'Baixando...' : 'Baixar foto principal'}
+                    aria-label="Baixar foto principal"
+                    className={`absolute -right-2 -top-2 z-10 w-9 h-9 rounded-full border border-slate-700 bg-slate-950/90 backdrop-blur flex items-center justify-center shadow-lg transition
+                      ${downloadingFoto ? 'opacity-70 cursor-wait' : 'hover:border-blue-500 hover:scale-105 active:scale-95'}`}
+                    disabled={downloadingFoto}
+                  >
+                    <span className="text-sm">{downloadingFoto ? '⏳' : '⬇️'}</span>
+                  </button>
                 )}
+              </div>
+            </div>
+
+            {/* Faixa de miniaturas — só aparece se há mais de uma foto
+                OU se está no modo de edição (para permitir adicionar).
+                A primeira do array é a principal (sinalizada com borda
+                rosa). Em modo edição, cada miniatura tem controles
+                de mover ← → e remover ✕. */}
+            {(fotosEfetivas.length > 1 || editando) && (
+              <div className="mt-3 flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+                {fotosEfetivas.map((bruta, i) => {
+                  const url = fotosSignedMap[bruta];
+                  const eprincipal = i === 0;
+                  return (
+                    <div key={`${bruta}-${i}`} className="relative shrink-0">
+                      <button
+                        onClick={() => {
+                          if (editando) return;
+                          setLightboxIndice(i);
+                          setLightboxAberta(true);
+                        }}
+                        className={`w-16 h-16 rounded-2xl overflow-hidden border-2 bg-slate-950 ${
+                          eprincipal ? 'border-pink-500' : 'border-slate-700'
+                        } ${editando ? 'cursor-default' : 'cursor-zoom-in hover:border-slate-500'}`}
+                        title={eprincipal ? 'Foto principal' : `Foto ${i + 1}`}
+                      >
+                        {url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={url} className="w-full h-full object-cover" alt="" />
+                        ) : (
+                          <span className="text-xl opacity-30">📷</span>
+                        )}
+                      </button>
+
+                      {editando && (
+                        <>
+                          <button
+                            onClick={() => removerFoto(i)}
+                            className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-600 border border-slate-950 text-white text-[10px] font-black flex items-center justify-center shadow hover:bg-red-500 active:scale-90"
+                            aria-label="Remover foto"
+                            title="Remover foto"
+                          >
+                            ✕
+                          </button>
+                          <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 flex gap-0.5 bg-slate-950/95 border border-slate-700 rounded-full shadow px-0.5">
+                            <button
+                              onClick={() => moverFoto(i, -1)}
+                              disabled={i === 0}
+                              className="w-5 h-5 rounded-full text-white text-[10px] font-black flex items-center justify-center disabled:opacity-25 hover:bg-slate-800 active:scale-90"
+                              aria-label="Mover para trás"
+                              title="Mover para trás"
+                            >
+                              ‹
+                            </button>
+                            <button
+                              onClick={() => moverFoto(i, 1)}
+                              disabled={i === fotosEfetivas.length - 1}
+                              className="w-5 h-5 rounded-full text-white text-[10px] font-black flex items-center justify-center disabled:opacity-25 hover:bg-slate-800 active:scale-90"
+                              aria-label="Mover para frente"
+                              title="Mover para frente"
+                            >
+                              ›
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
 
                 {editando && (
-                  <div className="absolute bottom-0 inset-x-0 bg-black/70 py-1 flex items-center justify-center gap-1 backdrop-blur-sm animate-in fade-in">
-                    <span className="text-[10px] text-white font-bold uppercase tracking-wide">📷 Alterar</span>
-                  </div>
+                  <button
+                    onClick={() => setModalFoto(true)}
+                    className="shrink-0 w-16 h-16 rounded-2xl border-2 border-dashed border-slate-700 hover:border-pink-500 text-slate-500 hover:text-pink-500 flex flex-col items-center justify-center gap-0.5 active:scale-95 transition-colors"
+                    title="Adicionar foto"
+                    aria-label="Adicionar foto"
+                  >
+                    <span className="text-lg leading-none">+</span>
+                    <span className="text-[8px] font-black uppercase tracking-wider">Foto</span>
+                  </button>
                 )}
-              </button>
+              </div>
+            )}
 
-              {!!produto?.foto_url && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    baixarFotoOriginal();
-                  }}
-                  title={downloadingFoto ? 'Baixando...' : 'Baixar foto original'}
-                  aria-label="Baixar foto original"
-                  className={`absolute -right-2 -top-2 z-10 w-9 h-9 rounded-full border border-slate-700 bg-slate-950/90 backdrop-blur flex items-center justify-center shadow-lg transition
-                    ${downloadingFoto ? 'opacity-70 cursor-wait' : 'hover:border-blue-500 hover:scale-105 active:scale-95'}`}
-                  disabled={downloadingFoto}
-                >
-                  <span className="text-sm">{downloadingFoto ? '⏳' : '⬇️'}</span>
-                </button>
-              )}
-            </div>
+            {editando && fotosEfetivas.length > 1 && (
+              <p className="mt-2 text-[10px] text-slate-500 font-bold uppercase tracking-wider text-center md:text-left">
+                A foto com borda rosa é a principal
+              </p>
+            )}
           </div>
 
           <div className="flex-1 space-y-4">
@@ -1052,6 +1249,14 @@ const uploadFoto = async (file: File) => {
           </div>
         </div>
       )}
+
+      <PhotoLightbox
+        aberto={lightboxAberta}
+        onClose={() => setLightboxAberta(false)}
+        fotos={fotosEfetivas}
+        produto={produto}
+        fotoInicial={lightboxIndice}
+      />
     </div>
   );
 }

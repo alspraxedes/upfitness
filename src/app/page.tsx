@@ -8,6 +8,7 @@ import { supabase } from '../lib/supabase';
 import Image from 'next/image';
 import { getSignedUrlCached } from '../lib/signedUrlCache';
 import { adicionarAoRascunhoLocal, type ItemCarrinho } from '../lib/carrinho';
+import PhotoLightbox from './components/PhotoLightbox';
 
 // --- UTILITÁRIOS ---
 function formatBRL(v: any) {
@@ -379,6 +380,9 @@ export default function Dashboard() {
   const dataFetchedRef = useRef(false);
   const restoredScrollRef = useRef(false);
 
+  // --- Lightbox de foto ---
+  const [lightboxProduto, setLightboxProduto] = useState<any | null>(null);
+
   // --- Swipe-to-add: bottom sheet de seleção de tamanho + toast ---
   const [swipeProduto, setSwipeProduto] = useState<any | null>(null);
   const [swipeToast, setSwipeToast] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -544,7 +548,7 @@ export default function Dashboard() {
       .from('produtos')
       .select(
         `
-        id, codigo_peca, sku_fornecedor, fornecedor, descricao, cor, foto_url, preco_venda, preco_compra, custo_frete, custo_embalagem, created_at,
+        id, codigo_peca, sku_fornecedor, fornecedor, descricao, cor, foto_url, fotos, preco_venda, preco_compra, custo_frete, custo_embalagem, created_at,
         estoque ( id, quantidade, codigo_barras, tamanho:tamanhos ( nome, ordem ) )
       `
       )
@@ -1042,7 +1046,17 @@ export default function Dashboard() {
                   onMouseDown={() => saveReturnState(produto.id)}
                   className="bg-slate-900 rounded-[2.5rem] flex overflow-hidden border border-slate-800/50 min-h-[160px] shadow-xl group active:scale-[0.98] transition-all"
                 >
-                  <div className="w-36 bg-slate-950 relative border-r border-slate-800 flex-shrink-0">
+                  <div
+                    className="w-36 bg-slate-950 relative border-r border-slate-800 flex-shrink-0 cursor-zoom-in"
+                    onClick={(e) => {
+                      if (!urlAssinada) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setLightboxProduto(produto);
+                    }}
+                    role={urlAssinada ? 'button' : undefined}
+                    aria-label={urlAssinada ? 'Ampliar foto' : undefined}
+                  >
                     {urlAssinada ? (
                       <Image
                         src={urlAssinada}
@@ -1349,6 +1363,22 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* LIGHTBOX DE FOTO */}
+      <PhotoLightbox
+        aberto={!!lightboxProduto}
+        onClose={() => setLightboxProduto(null)}
+        fotos={
+          lightboxProduto
+            ? (lightboxProduto.fotos && lightboxProduto.fotos.length > 0
+                ? lightboxProduto.fotos
+                : lightboxProduto.foto_url
+                  ? [lightboxProduto.foto_url]
+                  : [])
+            : []
+        }
+        produto={lightboxProduto}
+      />
 
       {/* BOTTOM SHEET DE TAMANHO (swipe do card) --------------------- */}
       {swipeProduto && (
