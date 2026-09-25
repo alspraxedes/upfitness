@@ -6,8 +6,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '../../lib/supabase';
-import { getSignedUrlCached } from '../../lib/signedUrlCache';
-import { thumbPathFromOriginal } from '../../lib/thumbUtils';
+import { thumbUrlFromFotoUrl } from '../../lib/thumbUtils';
 
 // --- UTIL ---
 const formatBRL = (val: number) =>
@@ -194,11 +193,8 @@ function RelatoriosInner() {
   const [tip, setTip] = useState<null | { day: string; total: number; x: number; y: number; place: 'top' | 'inside' }>(null);
 
   // Fotos assinadas (thumbnails do ranking + itens por fornecedor)
-  const [signedMap, setSignedMap] = useState<Record<string, string>>({});
-  const signedMapRef = useRef<Record<string, string>>({});
-  useEffect(() => {
-    signedMapRef.current = signedMap;
-  }, [signedMap]);
+  // (bucket 'produtos' agora é público — as thumbs são derivadas
+  // síncronamente via thumbUrlFromFotoUrl no lugar de onde antes lia signedMap)
 
   // Persistência
   const STORAGE_KEY = 'upfitness_relatorios_filtros_v4';
@@ -476,70 +472,8 @@ function RelatoriosInner() {
     }
   }
 
-  // --- Assinar thumbnails (produtos.foto_url) ---
-  const fotosFingerprint = useMemo(() => {
-    const urls: string[] = [];
-
-    prodAgg.forEach((p) => {
-      if (p.foto_url) urls.push(p.foto_url);
-    });
-    suppAgg.forEach((s) => {
-      s.itemsTop?.forEach((it) => {
-        if (it.foto_url) urls.push(it.foto_url);
-      });
-    });
-
-    return urls.join('|');
-  }, [prodAgg, suppAgg]);
-
-  useEffect(() => {
-    if (!fotosFingerprint) return;
-
-    let cancelled = false;
-
-    const uniqueUrls = Array.from(
-      new Set(
-        fotosFingerprint
-          .split('|')
-          .map((x) => x.trim())
-          .filter(Boolean)
-      )
-    );
-
-    const run = async () => {
-      const updates: Record<string, string> = {};
-
-      await Promise.all(
-        uniqueUrls.map(async (url) => {
-          if (!url) return;
-          if (signedMapRef.current[url]) return;
-
-          // Assina o path da THUMB (não da original). A chave do cache
-          // continua sendo a URL original, então signedMap[url] segue funcionando.
-          const signed = await getSignedUrlCached(
-            'produtos',
-            url,
-            (u) => {
-              const path = extractPath(u);
-              return path ? thumbPathFromOriginal(path) : null;
-            },
-            3600,
-          );
-          if (!cancelled && signed) updates[url] = signed;
-        })
-      );
-
-      if (!cancelled && Object.keys(updates).length > 0) {
-        setSignedMap((prev) => ({ ...prev, ...updates }));
-      }
-    };
-
-    run();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [fotosFingerprint]);
+  // Nota: com bucket 'produtos' público, não precisamos assinar URLs.
+  // As thumbs são derivadas síncronamente de foto_url via thumbUrlFromFotoUrl().
 
   // --- Ordenação e limite do ranking de produtos ---
   const produtosOrdenados = useMemo(() => {
@@ -872,7 +806,7 @@ function RelatoriosInner() {
           ) : (
             <div className="mt-4 space-y-2">
               {produtosOrdenados.map((p, i) => {
-                const thumb = p.foto_url ? signedMap[p.foto_url] : null;
+                const thumb = thumbUrlFromFotoUrl(p.foto_url);
                 const margemBadge =
                   p.margem_total >= 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-900/40' : 'bg-red-500/15 text-red-400 border-red-900/40';
 
@@ -991,7 +925,7 @@ function RelatoriosInner() {
                         ) : (
                           <div className="space-y-2">
                             {s.itemsTop.map((p, idx) => {
-                              const thumb = p.foto_url ? signedMap[p.foto_url] : null;
+                              const thumb = thumbUrlFromFotoUrl(p.foto_url);
                               const margemBadgeItem =
                                 p.margem_total >= 0
                                   ? 'bg-emerald-500/15 text-emerald-400 border-emerald-900/40'

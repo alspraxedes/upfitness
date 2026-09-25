@@ -6,7 +6,7 @@ import { supabase } from '../../lib/supabase';
 import { Html5Qrcode } from 'html5-qrcode';
 import Cropper from 'react-easy-crop';
 import { useSearchParams } from 'next/navigation';
-import { gerarThumb, thumbPathFromOriginal } from '../../lib/thumbUtils';
+import { gerarThumb, thumbPathFromOriginal, thumbUrlFromFotoUrl } from '../../lib/thumbUtils';
 import { playBeep } from '../../lib/sound';
 import { RASCUNHO_LOCAL_KEY, type ItemCarrinho } from '../../lib/carrinho';
 
@@ -232,7 +232,7 @@ function VendaPageInner() {
   const [lendoArquivo, setLendoArquivo] = useState(false);
   const [produtos, setProdutos] = useState<Produto[]>([]);
   const [busca, setBusca] = useState('');
-  const [signedMap, setSignedMap] = useState<Record<string, string>>({});
+  // (bucket 'produtos' agora é público — thumbs derivadas via thumbUrlFromFotoUrl)
   const [abaMobile, setAbaMobile] = useState<'busca' | 'carrinho'>('busca');
   const [carrinho, setCarrinho] = useState<ItemCarrinho[]>([]);
 
@@ -407,39 +407,8 @@ function VendaPageInner() {
     });
   }, [busca, produtosDisponiveis]);
 
-  const thumbJobVersionRef = useRef(0);
-
-  useEffect(() => {
-    const version = ++thumbJobVersionRef.current;
-    let cancelled = false;
-
-    const run = async () => {
-      // Signed URLs apenas para fotos que aparecem no carrinho e modais (foto grande)
-      const normalToSign = new Set<string>();
-      carrinho.forEach((item) => { if (item.foto && !signedMap[item.foto]) normalToSign.add(item.foto); });
-      if (modalSelecao?.foto_url && !signedMap[modalSelecao.foto_url]) normalToSign.add(modalSelecao.foto_url);
-      if (itemPendente?.produto.foto_url && !signedMap[itemPendente.produto.foto_url]) normalToSign.add(itemPendente.produto.foto_url);
-
-      if (normalToSign.size === 0) return;
-
-      const newSigned: Record<string, string> = {};
-      for (const original of Array.from(normalToSign)) {
-        if (cancelled || version !== thumbJobVersionRef.current) return;
-        const path = extractPath(original);
-        if (!path) continue;
-        // Assina a THUMB (o carrinho e os modais mostram foto pequena).
-        // O lightbox de zoom, que precisa da original, tem seu próprio fluxo.
-        const thumbPath = thumbPathFromOriginal(path);
-        const { data } = await supabase.storage.from('produtos').createSignedUrl(thumbPath, 3600);
-        if (data?.signedUrl) newSigned[original] = data.signedUrl;
-      }
-      if (!cancelled && version === thumbJobVersionRef.current && Object.keys(newSigned).length > 0)
-        setSignedMap((prev) => ({ ...prev, ...newSigned }));
-    };
-
-    run().catch(() => {});
-    return () => { cancelled = true; };
-  }, [carrinho, modalSelecao, itemPendente]);
+  // Nota: com bucket 'produtos' público, não precisamos assinar URLs.
+  // As thumbs do carrinho e dos modais vêm direto de thumbUrlFromFotoUrl().
 
   useEffect(() => {
     const totalBrutoCalc = carrinho.reduce((acc, item) => acc + item.preco * item.qtd, 0);
@@ -1269,7 +1238,7 @@ setMostrarSugestoes(false);
               return (
                 <div key={item.tempId} className={`bg-slate-900/90 p-3 rounded-2xl border flex gap-3 relative group transition-colors shadow-sm ${zerado ? 'border-red-900/60 hover:border-red-700' : 'border-slate-800 hover:border-slate-600'}`}>
                   <div className="w-16 h-16 rounded-xl bg-slate-800 overflow-hidden border border-slate-700 flex-shrink-0 relative">
-                    {item.foto && signedMap[item.foto] ? <img src={signedMap[item.foto]} className="w-full h-full object-cover" alt="" loading="lazy" decoding="async" /> : <div className="w-full h-full flex items-center justify-center text-xs">📷</div>}
+                    {item.foto && thumbUrlFromFotoUrl(item.foto) ? <img src={thumbUrlFromFotoUrl(item.foto)!} className="w-full h-full object-cover" alt="" loading="lazy" decoding="async" /> : <div className="w-full h-full flex items-center justify-center text-xs">📷</div>}
                     {zerado && <div className="absolute bottom-0 left-0 right-0 bg-red-600/90 text-white text-[9px] font-black uppercase text-center py-0.5">zerado</div>}
                   </div>
                   <div className="flex-1 min-w-0 flex flex-col justify-center">
@@ -1479,7 +1448,7 @@ setMostrarSugestoes(false);
               <h3 className="text-sm font-black uppercase text-white leading-tight line-clamp-2">{itemPendente.produto.descricao}</h3>
             </div>
             <div className="relative aspect-square bg-black rounded-2xl border-2 border-slate-700 overflow-hidden shadow-2xl mx-auto w-32 shrink-0">
-              {itemPendente.produto.foto_url && signedMap[itemPendente.produto.foto_url] ? <img src={signedMap[itemPendente.produto.foto_url]} className="w-full h-full object-cover" alt="" loading="lazy" decoding="async" /> : <div className="w-full h-full flex items-center justify-center text-4xl opacity-20">📷</div>}
+              {itemPendente.produto.foto_url && thumbUrlFromFotoUrl(itemPendente.produto.foto_url) ? <img src={thumbUrlFromFotoUrl(itemPendente.produto.foto_url)!} className="w-full h-full object-cover" alt="" loading="lazy" decoding="async" /> : <div className="w-full h-full flex items-center justify-center text-4xl opacity-20">📷</div>}
               <div className="absolute bottom-0 left-0 right-0 bg-black/80 backdrop-blur-sm p-1 flex justify-between items-center px-2">
                 <span className="text-[9px] font-bold text-white uppercase truncate">{itemPendente.produto.cor}</span>
                 <span className="text-[9px] font-black text-white bg-pink-600 px-1.5 py-0.5 rounded-md">{itemPendente.est.tamanho.nome}</span>

@@ -6,8 +6,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
 import Image from 'next/image';
-import { getSignedUrlCached } from '../lib/signedUrlCache';
-import { thumbPathFromOriginal } from '../lib/thumbUtils';
+import { thumbUrlFromFotoUrl } from '../lib/thumbUtils';
 import { adicionarAoRascunhoLocal, type ItemCarrinho } from '../lib/carrinho';
 import PhotoLightbox from './components/PhotoLightbox';
 
@@ -359,7 +358,6 @@ export default function Dashboard() {
   const router = useRouter();
 
   const [produtos, setProdutos] = useState<any[]>([]);
-  const [signedMap, setSignedMap] = useState<Record<string, string>>({});
   const [busca, setBusca] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -452,12 +450,6 @@ export default function Dashboard() {
   const anchorKey = 'dashboard:anchor';
   const shouldRestoreKey = 'dashboard:shouldRestore';
   const lastQueryKey = 'dashboard:lastQuery';
-
-  // Para evitar re-render/loop e para o cache de assinatura
-  const signedMapRef = useRef<Record<string, string>>({});
-  useEffect(() => {
-    signedMapRef.current = signedMap;
-  }, [signedMap]);
 
   const clearBusca = (alsoCloseScanner?: boolean) => {
     setBusca('');
@@ -567,48 +559,10 @@ export default function Dashboard() {
     setLoading(false);
   }
 
-  const fotosFingerprint = useMemo(() => produtos.map((p) => p.foto_url || '').join('|'), [produtos]);
-
-  // --- Assinar imagens (private bucket) ---
-  useEffect(() => {
-    if (produtos.length === 0) return;
-
-    let cancelled = false;
-
-    const carregarImagens = async () => {
-      const updates: Record<string, string> = {};
-
-      await Promise.all(
-        produtos.map(async (p) => {
-          if (!p.foto_url) return;
-          if (signedMapRef.current[p.foto_url]) return;
-
-          // Assina o path da THUMB (não da original). A chave do cache
-          // continua sendo p.foto_url, então o resto da UI não muda.
-          const signed = await getSignedUrlCached(
-            'produtos',
-            p.foto_url,
-            (u) => {
-              const path = extractPath(u);
-              return path ? thumbPathFromOriginal(path) : null;
-            },
-            3600,
-          );
-          if (!cancelled && signed) updates[p.foto_url] = signed;
-        })
-      );
-
-      if (!cancelled && Object.keys(updates).length > 0) {
-        setSignedMap((prev) => ({ ...prev, ...updates }));
-      }
-    };
-
-    carregarImagens();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [produtos.length, fotosFingerprint]);
+  // Nota: com bucket 'produtos' público, não precisamos assinar URLs.
+  // A URL pública da thumb é derivada síncronamente de p.foto_url via
+  // thumbUrlFromFotoUrl(), então o browser cacheia entre sessões e não
+  // há round-trip pro Supabase pra gerar signed URL.
 
   const listaFornecedores = useMemo(() => {
     const set = new Set<string>();
@@ -1046,7 +1000,7 @@ export default function Dashboard() {
             </div>
           ) : (
             filtrados.map((produto, idx) => {
-              const urlAssinada = produto.foto_url ? signedMap[produto.foto_url] : null;
+              const urlAssinada = thumbUrlFromFotoUrl(produto.foto_url);
               const total = produto.estoque?.reduce((acc: number, item: any) => acc + (item.quantidade || 0), 0) || 0;
               const itemHref = currentQS ? `/item/${produto.id}?${currentQS}` : `/item/${produto.id}`;
               const swatch = getSwatchStyle(produto.cor);

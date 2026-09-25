@@ -18,8 +18,7 @@
 
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
-import { getSignedUrlCached } from '../../lib/signedUrlCache';
-import { thumbPathFromOriginal, extractStoragePath } from '../../lib/thumbUtils';
+import { thumbUrlFromFotoUrl } from '../../lib/thumbUtils';
 
 // --- TIPOS ---
 type EstoqueItem = {
@@ -96,9 +95,7 @@ export default function BuscaProduto({
     qtdStr: string;
     precoStr: string;
   } | null>(null);
-  // Signed URLs das thumbs (funciona em bucket privado ou público).
-  // Chave = foto_url original do produto; valor = signed URL da thumb.
-  const [signedMap, setSignedMap] = useState<Record<string, string>>({});
+  // (bucket 'produtos' agora é público — thumbs derivadas via thumbUrlFromFotoUrl)
 
   // --- FETCH inicial ---
   useEffect(() => {
@@ -164,39 +161,8 @@ export default function BuscaProduto({
     });
   }, [busca, disponiveis]);
 
-  // --- SIGNED URLs das thumbs dos produtos visíveis ---
-  // Padrão idêntico ao usado nas telas home/relatorios/venda: chave é a
-  // foto_url original; valor é a signed URL da thumb. Se o bucket for
-  // público, também funciona (o signed URL sempre resolve).
-  useEffect(() => {
-    let cancelado = false;
-    (async () => {
-      const alvos = visiveis.filter((p) => p.foto_url && !signedMap[p.foto_url!]);
-      if (alvos.length === 0) return;
-      const updates: Record<string, string> = {};
-      await Promise.all(
-        alvos.map(async (p) => {
-          if (!p.foto_url) return;
-          const signed = await getSignedUrlCached(
-            'produtos',
-            p.foto_url,
-            (u) => {
-              const path = extractStoragePath(u);
-              return path ? thumbPathFromOriginal(path) : null;
-            },
-            3600,
-          );
-          if (!cancelado && signed) updates[p.foto_url] = signed;
-        }),
-      );
-      if (!cancelado && Object.keys(updates).length > 0) {
-        setSignedMap((prev) => ({ ...prev, ...updates }));
-      }
-    })();
-    return () => {
-      cancelado = true;
-    };
-  }, [visiveis, signedMap]);
+  // (não precisa mais assinar URLs — bucket público. Thumbs derivadas
+  // via thumbUrlFromFotoUrl no lugar de renderização.)
 
   // --- HANDLERS ---
   const abrirTamanhos = useCallback((p: Produto) => {
@@ -302,7 +268,7 @@ export default function BuscaProduto({
               </div>
             ) : (
               visiveis.map((p, idx) => {
-                const thumbUrl = p.foto_url ? signedMap[p.foto_url] ?? null : null;
+                const thumbUrl = thumbUrlFromFotoUrl(p.foto_url);
                 return (
                   <button
                     key={p.id}
@@ -356,9 +322,9 @@ export default function BuscaProduto({
             <div className="flex justify-between items-start mb-6 shrink-0 gap-4">
               <div className="flex items-start gap-4 min-w-0">
                 <div className="w-16 h-16 rounded-2xl bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center shrink-0">
-                  {selecionado.foto_url && signedMap[selecionado.foto_url] ? (
+                  {selecionado.foto_url && thumbUrlFromFotoUrl(selecionado.foto_url) ? (
                     <img
-                      src={signedMap[selecionado.foto_url]}
+                      src={thumbUrlFromFotoUrl(selecionado.foto_url)!}
                       className="w-full h-full object-cover"
                       alt=""
                       loading="eager"
