@@ -427,7 +427,10 @@ function VendaPageInner() {
         if (cancelled || version !== thumbJobVersionRef.current) return;
         const path = extractPath(original);
         if (!path) continue;
-        const { data } = await supabase.storage.from('produtos').createSignedUrl(path, 3600);
+        // Assina a THUMB (o carrinho e os modais mostram foto pequena).
+        // O lightbox de zoom, que precisa da original, tem seu próprio fluxo.
+        const thumbPath = thumbPathFromOriginal(path);
+        const { data } = await supabase.storage.from('produtos').createSignedUrl(thumbPath, 3600);
         if (data?.signedUrl) newSigned[original] = data.signedUrl;
       }
       if (!cancelled && version === thumbJobVersionRef.current && Object.keys(newSigned).length > 0)

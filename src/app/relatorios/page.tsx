@@ -7,6 +7,7 @@ import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '../../lib/supabase';
 import { getSignedUrlCached } from '../../lib/signedUrlCache';
+import { thumbPathFromOriginal } from '../../lib/thumbUtils';
 
 // --- UTIL ---
 const formatBRL = (val: number) =>
@@ -513,7 +514,17 @@ function RelatoriosInner() {
           if (!url) return;
           if (signedMapRef.current[url]) return;
 
-          const signed = await getSignedUrlCached('produtos', url, extractPath, 3600);
+          // Assina o path da THUMB (não da original). A chave do cache
+          // continua sendo a URL original, então signedMap[url] segue funcionando.
+          const signed = await getSignedUrlCached(
+            'produtos',
+            url,
+            (u) => {
+              const path = extractPath(u);
+              return path ? thumbPathFromOriginal(path) : null;
+            },
+            3600,
+          );
           if (!cancelled && signed) updates[url] = signed;
         })
       );

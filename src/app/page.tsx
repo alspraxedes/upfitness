@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabase';
 import Image from 'next/image';
 import { getSignedUrlCached } from '../lib/signedUrlCache';
+import { thumbPathFromOriginal } from '../lib/thumbUtils';
 import { adicionarAoRascunhoLocal, type ItemCarrinho } from '../lib/carrinho';
 import PhotoLightbox from './components/PhotoLightbox';
 
@@ -582,7 +583,17 @@ export default function Dashboard() {
           if (!p.foto_url) return;
           if (signedMapRef.current[p.foto_url]) return;
 
-          const signed = await getSignedUrlCached('produtos', p.foto_url, extractPath, 3600);
+          // Assina o path da THUMB (não da original). A chave do cache
+          // continua sendo p.foto_url, então o resto da UI não muda.
+          const signed = await getSignedUrlCached(
+            'produtos',
+            p.foto_url,
+            (u) => {
+              const path = extractPath(u);
+              return path ? thumbPathFromOriginal(path) : null;
+            },
+            3600,
+          );
           if (!cancelled && signed) updates[p.foto_url] = signed;
         })
       );
@@ -633,12 +644,12 @@ export default function Dashboard() {
           return bcDigits === qDigits || bcDigits.includes(qDigits);
         });
 
-        const matchTamanho =
+      const matchTamanho =
         tamanhosSelecionados.length === 0 ||
         p.estoque?.some(
           (e: any) => tamanhosSelecionados.includes(e.tamanho?.nome) && (Number(e.quantidade) || 0) > 0,
         );
-        
+
       const matchFornecedor = !fornecedorSelecionado || p.fornecedor === fornecedorSelecionado;
       const matchEstoque = esconderZerados ? total > 0 : true;
 
