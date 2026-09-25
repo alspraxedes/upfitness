@@ -64,7 +64,9 @@ type Linha = LinhaSimples | LinhaCredito | LinhaCrediario;
 type VendaMin = {
   id: string;
   codigo_venda: number;
+  valor_total: number;
   valor_liquido: number;
+  desconto: number;
   nome_cliente: string | null;
   forma_pagamento: string;
 };
@@ -102,6 +104,12 @@ export default function EditarPagamentoModal({
   const [erro, setErro] = useState<string | null>(null);
   const [linhas, setLinhas] = useState<Linha[]>([]);
   const [tinhaCrediarioOriginal, setTinhaCrediarioOriginal] = useState(false);
+  // Desconto editável. Iniciado com o valor atual da venda; se o usuário
+  // mexer, será enviado como p_desconto no RPC (compat: quando não muda,
+  // envia NULL e o RPC não toca em vendas.desconto).
+  const [descontoStr, setDescontoStr] = useState<string>(() =>
+    valorParaStr(venda.desconto || 0),
+  );
 
   // ---- Fetch inicial ----
   useEffect(() => {
@@ -194,7 +202,18 @@ export default function EditarPagamentoModal({
   }, [venda.id, venda.valor_liquido]);
 
   // ---- Cálculos ----
-  const valorTotalCents = Math.round((venda.valor_liquido || 0) * 100);
+  // Desconto vigente na tela (pode ter sido editado). Clampado entre 0 e valor_total.
+  const descontoAtual = useMemo(() => {
+    const v = parseValorDigitado(descontoStr);
+    if (isNaN(v) || v < 0) return 0;
+    if (v > (venda.valor_total || 0)) return venda.valor_total || 0;
+    return v;
+  }, [descontoStr, venda.valor_total]);
+  const descontoMudou =
+    Math.round(descontoAtual * 100) !== Math.round((venda.desconto || 0) * 100);
+  // valor_liquido derivado do desconto atual (não do que veio da venda).
+  const valorLiquidoAtual = Math.max(0, (venda.valor_total || 0) - descontoAtual);
+  const valorTotalCents = Math.round(valorLiquidoAtual * 100);
   const somaCents = linhas.reduce(
     (s, l) => s + Math.round(parseValorDigitado(l.valorStr) * 100),
     0
@@ -428,10 +447,20 @@ export default function EditarPagamentoModal({
         return base;
       });
 
-      const { error } = await supabase.rpc('editar_pagamento_venda', {
+      const rpcArgs: {
+        p_venda_id: string;
+        p_pagamentos: any;
+        p_desconto?: number;
+      } = {
         p_venda_id: venda.id,
         p_pagamentos: payload,
-      });
+      };
+      // Só envia p_desconto se o usuário mexeu — mantém compat com o
+      // comportamento anterior (não toca em vendas.desconto).
+      if (descontoMudou) {
+        rpcArgs.p_desconto = Math.round(descontoAtual * 100) / 100;
+      }
+      const { error } = await supabase.rpc('editar_pagamento_venda', rpcArgs);
       if (error) throw new Error(error.message);
       onSaved();
       onClose();
@@ -457,8 +486,60 @@ export default function EditarPagamentoModal({
             Venda #{venda.codigo_venda}
             {venda.nome_cliente?.trim() && <> • {venda.nome_cliente.trim()}</>}
             {' • '}
-            {formatBRL(venda.valor_liquido || 0)}
+            {formatBRL(valorLiquidoAtual)}
           </p>
+        </div>
+
+        {/* DESCONTO — editável, aos moldes da tela de finalização de venda */}
+        <div className="px-5 pt-4 shrink-0">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Total bruto
+                </p>
+                <p className="text-sm font-black text-slate-200">
+                  {formatBRL(venda.valor_total || 0)}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  A pagar (líquido)
+                </p>
+                <p
+                  className={`text-lg font-black ${
+                    descontoMudou ? 'text-violet-300' : 'text-white'
+                  }`}
+                >
+                  {formatBRL(valorLiquidoAtual)}
+                </p>
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 block mb-2">
+                Desconto {descontoMudou && <span className="text-violet-400">(alterado)</span>}
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm font-bold">
+                  R$
+                </span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={descontoStr}
+                  onChange={(e) =>
+                    setDescontoStr(e.target.value.replace(/[^0-9.,]/g, ''))
+                  }
+                  className="w-full h-12 pl-10 pr-3 rounded-xl bg-slate-900 border-2 border-slate-800 focus:border-violet-500 outline-none text-base font-black text-white"
+                />
+              </div>
+              {descontoAtual > (venda.valor_total || 0) - 0.005 && (
+                <p className="text-[10px] text-amber-400 mt-1 font-bold">
+                  Desconto seria maior que o total. Foi limitado ao total bruto.
+                </p>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* CORPO */}
