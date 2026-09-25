@@ -633,9 +633,12 @@ export default function Dashboard() {
           return bcDigits === qDigits || bcDigits.includes(qDigits);
         });
 
-      const matchTamanho =
-        tamanhosSelecionados.length === 0 || p.estoque?.some((e: any) => tamanhosSelecionados.includes(e.tamanho?.nome));
-
+        const matchTamanho =
+        tamanhosSelecionados.length === 0 ||
+        p.estoque?.some(
+          (e: any) => tamanhosSelecionados.includes(e.tamanho?.nome) && (Number(e.quantidade) || 0) > 0,
+        );
+        
       const matchFornecedor = !fornecedorSelecionado || p.fornecedor === fornecedorSelecionado;
       const matchEstoque = esconderZerados ? total > 0 : true;
 

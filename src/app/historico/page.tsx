@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { supabase } from '../../lib/supabase';
 import { useSearchParams } from 'next/navigation';
 import EditarPagamentoModal from '../components/EditarPagamentoModal';
+import EditarItensVendaModal from '../components/EditarItensVendaModal';
 import { formatDataCurta } from '../../lib/crediario';
 
 // --- TIPOS ---
@@ -56,6 +57,7 @@ type Venda = {
   itens_venda: ItemVenda[];
   crediario_parcelas: ParcelaCred[];
   venda_pagamentos: PagamentoVenda[];
+  venda_edicoes?: { id: string }[]; // contador de edições (badge)
 };
 
 // --- UTILITÁRIOS ---
@@ -110,6 +112,11 @@ function HistoricoPageInner() {
   // "Converter p/ Crediário". A complexidade toda está no componente.
   const [modalEditar, setModalEditar] = useState<Venda | null>(null);
 
+  // Modal "Editar itens" (Fase 3 do editar-venda). Ao salvar, se
+  // valor_liquido mudou, encadeamos o modalEditar (pagamento) com a
+  // venda já atualizada para a usuária reconciliar a soma dos pagamentos.
+  const [modalEditarItens, setModalEditarItens] = useState<Venda | null>(null);
+
   function abrirEditar(venda: Venda) {
     if (!venda.nome_cliente?.trim() && venda.forma_pagamento !== 'crediario') {
       // Se for adicionar crediário sem cliente, o RPC vai deixar passar
@@ -121,6 +128,41 @@ function HistoricoPageInner() {
       if (!ok) return;
     }
     setModalEditar(venda);
+  }
+
+  function abrirEditarItens(venda: Venda) {
+    // Crediário com alguma parcela paga precisa passar pela edição de
+    // pagamento no fim do fluxo. Deixamos abrir mesmo assim — o encadeamento
+    // com o modal de pagamento cobre a reconciliação (Antonio confirmou
+    // essa decisão na Fase 0 de planejamento).
+    setModalEditarItens(venda);
+  }
+
+  // Chamada pelo EditarItensVendaModal ao salvar com sucesso.
+  // Se o valor líquido mudou, abre o modal de pagamento em seguida
+  // com a venda já atualizada (vinda do RPC).
+  function apósSalvarItens(vendaOriginal: Venda, resultado: {
+    venda: any;
+    itens: any[];
+    precisa_reconciliar: boolean;
+  }) {
+    // Recarrega a lista pra refletir mudanças em qualquer lugar da tela.
+    fetchVendas();
+
+    if (resultado.precisa_reconciliar) {
+      // Monta uma Venda "temporária" com os totais atualizados para o
+      // EditarPagamentoModal. Ele faz seu próprio fetch das linhas de
+      // pagamento/parcelas, então só precisa dos campos usados no header
+      // e nos cálculos (valor_total, valor_liquido, desconto).
+      const vendaAtualizada: Venda = {
+        ...vendaOriginal,
+        valor_total: Number(resultado.venda?.valor_total ?? vendaOriginal.valor_total),
+        valor_liquido: Number(resultado.venda?.valor_liquido ?? vendaOriginal.valor_liquido),
+        desconto: Number(resultado.venda?.desconto ?? vendaOriginal.desconto),
+      };
+      // Pequeno defer pra deixar o modal de itens fechar visualmente antes.
+      setTimeout(() => setModalEditar(vendaAtualizada), 50);
+    }
   }
 
   // Pré-filtra a tela de Recebíveis pelo cliente (mesma chave de localStorage)
@@ -187,7 +229,8 @@ function HistoricoPageInner() {
           )
         ),
         crediario_parcelas ( id, numero, valor, data_vencimento, pago, data_pagamento ),
-        venda_pagamentos ( id, forma, valor, parcelas, crediario_frequencia, ordem )
+        venda_pagamentos ( id, forma, valor, parcelas, crediario_frequencia, ordem ),
+        venda_edicoes ( id )
       `)
       .order('created_at', { ascending: false });
 
@@ -502,6 +545,14 @@ function HistoricoPageInner() {
                         <span className="text-[10px] text-slate-400 font-bold uppercase">
                           {formatData(venda.created_at)}
                         </span>
+                        {(venda.venda_edicoes?.length ?? 0) > 0 && (
+                          <span
+                            title={`Venda editada ${venda.venda_edicoes!.length}x`}
+                            className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border border-amber-900/50 bg-amber-950/30 text-amber-300"
+                          >
+                            ✏ editada{venda.venda_edicoes!.length > 1 ? ` ${venda.venda_edicoes!.length}x` : ''}
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <span
@@ -723,6 +774,12 @@ function HistoricoPageInner() {
                         >
                           📄 Ver Recibo / Imprimir
                         </button>
+                        <button
+                          onClick={() => abrirEditarItens(venda)}
+                          className="w-full bg-pink-950/30 hover:bg-pink-900/40 text-pink-300 border border-pink-900/50 py-3 rounded-xl font-bold uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 transition"
+                        >
+                          ✂️ Editar Itens
+                        </button>
                         {venda.forma_pagamento !== 'crediario' && (
                           <button
                             onClick={() => abrirEditar(venda)}
@@ -881,6 +938,34 @@ function HistoricoPageInner() {
           venda={modalEditar}
           onClose={() => setModalEditar(null)}
           onSaved={() => { fetchVendas(); }}
+        />
+      )}
+
+      {/* MODAL EDITAR ITENS (Fase 3 do editar-venda) */}
+      {modalEditarItens && (
+        <EditarItensVendaModal
+          venda={{
+            id: modalEditarItens.id,
+            codigo_venda: modalEditarItens.codigo_venda,
+            nome_cliente: modalEditarItens.nome_cliente,
+            valor_total: modalEditarItens.valor_total,
+            valor_liquido: modalEditarItens.valor_liquido,
+            desconto: modalEditarItens.desconto,
+            itens_venda: modalEditarItens.itens_venda.map((it) => ({
+              id: it.id,
+              estoque_id: it.estoque_id,
+              descricao_completa: it.descricao_completa,
+              quantidade: it.quantidade,
+              preco_unitario: it.preco_unitario,
+              subtotal: it.subtotal,
+            })),
+          }}
+          onClose={() => setModalEditarItens(null)}
+          onSaved={(resultado) => {
+            const vendaOriginal = modalEditarItens;
+            setModalEditarItens(null);
+            apósSalvarItens(vendaOriginal, resultado);
+          }}
         />
       )}
 
