@@ -19,6 +19,10 @@ type VendaInfo = {
   valor_liquido: number;
 };
 
+type PagamentoInfo = {
+  valor: number;
+};
+
 type Parcela = {
   id: string;
   venda_id: string;
@@ -28,6 +32,7 @@ type Parcela = {
   pago: boolean;
   data_pagamento: string | null;
   venda: VendaInfo | null;
+  pagamento: PagamentoInfo | null;
 };
 
 type LinhaEdit = {
@@ -192,6 +197,9 @@ function RecebiveisPageInner() {
   const [linhas, setLinhas] = useState<LinhaEdit[]>([]);
   const [modalFreq, setModalFreq] = useState<FrequenciaCrediario>('mensal');
   const [salvandoModal, setSalvandoModal] = useState(false);
+  // Ids de parcelas em processo de baixa pelo checkbox inline — bloqueia
+  // cliques duplos e dá feedback visual.
+  const [baixando, setBaixando] = useState<Set<string>>(new Set());
   // Ids de parcelas pagas que o usuário destravou para edição (via lápis).
   // Linhas novas (id null) e pendentes são sempre editáveis.
   const [destravadas, setDestravadas] = useState<Set<string>>(new Set());
@@ -230,7 +238,7 @@ function RecebiveisPageInner() {
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase
         .from('crediario_parcelas')
-        .select('id, venda_id, numero, valor, data_vencimento, pago, data_pagamento, venda:vendas(codigo_venda, nome_cliente, parcelas, crediario_frequencia, valor_liquido)')
+        .select('id, venda_id, numero, valor, data_vencimento, pago, data_pagamento, venda:vendas(codigo_venda, nome_cliente, parcelas, crediario_frequencia, valor_liquido), pagamento:venda_pagamentos(valor)')
         .order('data_vencimento', { ascending: true })
         .order('numero', { ascending: true })
         .range(from, from + PAGE - 1);
@@ -284,7 +292,7 @@ function RecebiveisPageInner() {
     return arr;
   }, [clientes, busca, ordenarPor]);
 
-  type VendaGrupo = { venda_id: string; codigo: number; valorLiquido: number; frequencia: string | null; itens: Parcela[]; pagas: number; total: number; abertoVenda: number; };
+  type VendaGrupo = { venda_id: string; codigo: number; valorLiquido: number; valorCrediario: number; frequencia: string | null; itens: Parcela[]; pagas: number; total: number; abertoVenda: number; };
 
   const vendasDoCliente = useMemo<VendaGrupo[]>(() => {
     if (!clienteAberto) return [];
@@ -299,8 +307,14 @@ function RecebiveisPageInner() {
     mapa.forEach((itens, venda_id) => {
       const ordenadas = [...itens].sort((a, b) => a.numero - b.numero);
       const v = ordenadas[0]?.venda;
+      // Valor do crediário: vem da linha venda_pagamentos (forma=crediario) via
+      // pagamento_id. Para vendas antigas sem pagamento_id, cai no valor_liquido
+      // (compatível com vendas sem split, onde ambos coincidem).
+      const valorCrediarioRaw = ordenadas.find((p) => p.pagamento?.valor != null)?.pagamento?.valor;
+      const valorCrediario = Number(valorCrediarioRaw) || Number(v?.valor_liquido) || 0;
       out.push({
         venda_id, codigo: v?.codigo_venda ?? 0, valorLiquido: Number(v?.valor_liquido) || 0,
+        valorCrediario,
         frequencia: v?.crediario_frequencia ?? null, itens: ordenadas,
         pagas: ordenadas.filter((p) => p.pago).length, total: ordenadas.length,
         abertoVenda: ordenadas.filter((p) => !p.pago).reduce((a, p) => a + (Number(p.valor) || 0), 0),
@@ -322,7 +336,10 @@ function RecebiveisPageInner() {
     setModalVenda(v.venda_id);
   }
 
-  const totalVendaCents = vendaDoModal ? Math.round(vendaDoModal.valorLiquido * 100) : 0;
+  // Alvo da soma das parcelas: valor do CREDIÁRIO desta venda (pode ser menor
+  // que valor_liquido quando a venda tem split com crédito/dinheiro/pix).
+  const totalVendaCents = vendaDoModal ? Math.round(vendaDoModal.valorCrediario * 100) : 0;
+  const vendaTemSplit = !!vendaDoModal && Math.round(vendaDoModal.valorLiquido * 100) !== Math.round(vendaDoModal.valorCrediario * 100);
   const somaLinhasCents = linhas.reduce((a, l) => a + Math.round(l.valor * 100), 0);
   const somaOk = linhas.length > 0 && somaLinhasCents === totalVendaCents;
   const valoresOk = linhas.length > 0 && linhas.every((l) => Math.round(l.valor * 100) >= 0);
@@ -438,6 +455,41 @@ function RecebiveisPageInner() {
   }
 
 
+
+  // Baixa inline via checkbox: marca a parcela como paga no valor estipulado,
+  // na data de hoje, mantendo as demais pendentes inalteradas. Usa a mesma RPC
+  // confirmar_pagamento_parcela usada pelo modal de pagamento.
+  async function baixarParcelaInline(p: Parcela, itensDaVenda: Parcela[]) {
+    if (p.pago) return;
+    if (baixando.has(p.id)) return;
+    const ok = confirm(
+      `Dar baixa na ${p.numero}ª parcela de ${formatBRL(Number(p.valor) || 0)} como paga hoje (${formatDataCurta(hoje)})?`
+    );
+    if (!ok) return;
+    setBaixando((prev) => { const n = new Set(prev); n.add(p.id); return n; });
+    try {
+      // Redistribuição: todas as outras parcelas pendentes mantidas como estão
+      // (id + valor + data_vencimento atuais). A RPC valida que a soma delas
+      // fecha com o saldo pendente menos o valor pago — o que naturalmente
+      // ocorre quando pagamos a parcela pelo seu valor exato.
+      const outrasPendentes = itensDaVenda
+        .filter((x) => !x.pago && x.id !== p.id)
+        .map((x) => ({ id: x.id, valor: Math.round((Number(x.valor) || 0) * 100) / 100, data_vencimento: x.data_vencimento }));
+      const { error } = await supabase.rpc('confirmar_pagamento_parcela', {
+        p_parcela_id: p.id,
+        p_valor_pago: Math.round((Number(p.valor) || 0) * 100) / 100,
+        p_data_pagamento: hoje,
+        p_redistribuicao: outrasPendentes,
+      });
+      if (error) throw new Error(error.message);
+      await fetchParcelas();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Erro ao dar baixa: ${msg}`);
+    } finally {
+      setBaixando((prev) => { const n = new Set(prev); n.delete(p.id); return n; });
+    }
+  }
 
   async function salvarParcelamento(venda: VendaGrupo, freq: FrequenciaCrediario, payloadLinhas: LinhaEdit[]) {
     const payload = payloadLinhas.map((l) => ({
@@ -573,8 +625,25 @@ function RecebiveisPageInner() {
                 <div className="divide-y divide-slate-800/60">
                   {v.itens.map((p) => {
                     const atrasada = !p.pago && p.data_vencimento < hoje;
+                    const emBaixa = baixando.has(p.id);
                     return (
                       <div key={p.id} className="flex items-center gap-3 px-4 py-3">
+                        {/* Checkbox inline: marca como paga sem abrir Gerir parcelas */}
+                        <button
+                          type="button"
+                          onClick={() => { if (!p.pago && !emBaixa) baixarParcelaInline(p, v.itens); }}
+                          disabled={p.pago || emBaixa}
+                          title={p.pago ? 'Para editar, use Gerir parcelas' : emBaixa ? 'Salvando...' : 'Marcar como paga hoje'}
+                          aria-label={p.pago ? 'Parcela paga' : 'Marcar parcela como paga'}
+                          className={`shrink-0 w-6 h-6 rounded-md border-2 flex items-center justify-center active:scale-95 transition
+                            ${p.pago
+                              ? 'bg-emerald-500 border-emerald-500 text-white cursor-default'
+                              : emBaixa
+                                ? 'border-emerald-700 bg-emerald-950/50 text-emerald-300 animate-pulse cursor-wait'
+                                : 'border-slate-600 bg-slate-950 hover:border-emerald-500 hover:bg-emerald-950/40'}`}
+                        >
+                          {(p.pago || emBaixa) && <span className="text-sm font-black leading-none">✓</span>}
+                        </button>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-0.5">
                             <span className="text-xs font-black text-slate-300">{p.numero}ª</span>
@@ -588,7 +657,7 @@ function RecebiveisPageInner() {
                     );
                   })}
                 </div>
-                <div className="px-4 py-2 bg-slate-950/40 text-[9px] font-bold uppercase tracking-widest text-slate-600">Use Gerir parcelas para registrar pagamentos, ajustar valores, datas ou excluir parcelas</div>
+                <div className="px-4 py-2 bg-slate-950/40 text-[9px] font-bold uppercase tracking-widest text-slate-600">Marque o ✓ para dar baixa como paga hoje. Para ajustar valores, datas ou desmarcar, use Gerir parcelas.</div>
               </section>
             ))}
           </div>
@@ -601,7 +670,10 @@ function RecebiveisPageInner() {
           <div className="bg-slate-900 w-full max-w-md rounded-3xl border border-slate-700 shadow-2xl relative">
             <div className="p-5 border-b border-slate-800 sticky top-0 bg-slate-900 rounded-t-3xl z-10">
               <h3 className="text-lg font-black uppercase text-white tracking-tighter">Editar <span className="text-violet-400">parcelamento</span></h3>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mt-1">#{vendaDoModal.codigo} • {clienteAberto} • valor {formatBRL(vendaDoModal.valorLiquido)}</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mt-1">
+                #{vendaDoModal.codigo} • {clienteAberto} • venda {formatBRL(vendaDoModal.valorLiquido)}
+                {vendaTemSplit && <> • <span className="text-violet-400">crediário {formatBRL(vendaDoModal.valorCrediario)}</span></>}
+              </p>
             </div>
             <div className="p-5 space-y-4">
               {/* Frequência compacta (usada só para sugerir data ao adicionar) */}
