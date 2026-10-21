@@ -540,6 +540,15 @@ function CadastroPageInner() {
               </h1>
             </div>
           </div>
+
+          <Link
+            href={`/cadastro/importar${dashQS}`}
+            className="shrink-0 bg-violet-950/40 border border-violet-900/60 text-violet-300 hover:bg-violet-900/40 rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest active:scale-95 transition flex items-center gap-1.5"
+            aria-label="Importar planilha"
+            title="Importar planilha"
+          >
+            <span className="text-sm">📥</span> Importar
+          </Link>
         </div>
       </header>
 

@@ -12,9 +12,27 @@ import { thumbUrlFromFotoUrl } from '../../lib/thumbUtils';
 const formatBRL = (val: number) =>
   new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
 
+// Formato compacto para rótulos de barra (ex: 450 → "450", 1234 → "1,2k",
+// 12345 → "12k", 1200000 → "1,2M"). Vazia para zero para não poluir o gráfico.
+function formatCompactBR(v: number): string {
+  if (!v || v <= 0) return '';
+  if (v < 1000) return v.toFixed(0);
+  if (v < 10000) return `${(v / 1000).toFixed(1).replace('.', ',')}k`;
+  if (v < 1000000) return `${Math.round(v / 1000)}k`;
+  return `${(v / 1000000).toFixed(1).replace('.', ',')}M`;
+}
+
 function getQS(searchParams: ReturnType<typeof useSearchParams>) {
   const qs = searchParams?.toString() ?? '';
   return qs ? `?${qs}` : '';
+}
+
+// Monta o href de /item/[id] com from=relatorios para que o botão de voltar
+// da tela do item retorne para esta página em vez do dashboard.
+function itemHrefFromRelatorios(id: string, dashQS: string): string {
+  const sp = new URLSearchParams(dashQS.startsWith('?') ? dashQS.slice(1) : dashQS);
+  sp.set('from', 'relatorios');
+  return `/item/${id}?${sp.toString()}`;
 }
 
 function toISODateLocal(d: Date) {
@@ -133,6 +151,40 @@ type SupplierAgg = {
   itemsTop: SupplierItemAgg[]; // top itens do fornecedor (com detalhes)
 };
 
+// Inventário (snapshot atual — independente do filtro de datas)
+type ProdutoInventario = {
+  id: string;
+  descricao: string;
+  cor: string | null;
+  fornecedor: string;
+  foto_url: string | null;
+  created_at: string;
+  descontinuado: boolean;
+  custo_unit: number;
+  preco_venda: number;
+  qtd: number;
+};
+
+type FornecedorInventario = {
+  fornecedor: string;
+  qtd: number;
+  valorCusto: number;
+  valorVenda: number;
+  lucro: number;
+  skus: number;
+};
+
+type InventarioKpis = {
+  pecas: number;
+  skusComEstoque: number;
+  valorCusto: number;
+  valorVenda: number;
+  lucroPotencial: number;
+  skusIncompletos: number;
+  descontinuadosComEstoque: number;
+  pecasDescontinuadas: number;
+};
+
 // ---- PAGE WRAPPER ----
 export default function RelatoriosPage() {
   return (
@@ -161,6 +213,23 @@ function RelatoriosInner() {
   const [series, setSeries] = useState<DailyPoint[]>([]);
   const [prodAgg, setProdAgg] = useState<ProductAgg[]>([]);
   const [suppAgg, setSuppAgg] = useState<SupplierAgg[]>([]);
+
+  // Inventário (snapshot, não depende do período)
+  const [invKpis, setInvKpis] = useState<InventarioKpis>({
+    pecas: 0, skusComEstoque: 0, valorCusto: 0, valorVenda: 0, lucroPotencial: 0,
+    skusIncompletos: 0, descontinuadosComEstoque: 0, pecasDescontinuadas: 0,
+  });
+  const [invPorFornecedor, setInvPorFornecedor] = useState<FornecedorInventario[]>([]);
+  const [invMaisAntigos, setInvMaisAntigos] = useState<ProdutoInventario[]>([]);
+  const [invDescontinuados, setInvDescontinuados] = useState<ProdutoInventario[]>([]);
+  const [loadingInv, setLoadingInv] = useState(true);
+
+  // ABAS (Vendas | Inventário)
+  const [aba, setAba] = useState<'vendas' | 'inventario'>('vendas');
+  const [descontinuadosAberto, setDescontinuadosAberto] = useState(false);
+
+  // Granularidade do gráfico de evolução (persistida junto dos outros filtros)
+  const [granularidade, setGranularidade] = useState<'dia' | 'semana' | 'mes'>('dia');
 
   // KPIs
   const [kpis, setKpis] = useState({
@@ -209,6 +278,8 @@ function RelatoriosInner() {
         if (typeof parsed?.modoProdutos === 'string' && (parsed.modoProdutos === 'qtd' || parsed.modoProdutos === 'margem'))
           setModoProdutos(parsed.modoProdutos);
         if (typeof parsed?.limiteProdutos === 'number') setLimiteProdutos(Math.min(30, Math.max(3, parsed.limiteProdutos)));
+        if (parsed?.aba === 'vendas' || parsed?.aba === 'inventario') setAba(parsed.aba);
+        if (parsed?.granularidade === 'dia' || parsed?.granularidade === 'semana' || parsed?.granularidade === 'mes') setGranularidade(parsed.granularidade);
       }
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -216,9 +287,9 @@ function RelatoriosInner() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ dataInicio, dataFim, modoProdutos, limiteProdutos }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ dataInicio, dataFim, modoProdutos, limiteProdutos, aba, granularidade }));
     } catch {}
-  }, [dataInicio, dataFim, modoProdutos, limiteProdutos]);
+  }, [dataInicio, dataFim, modoProdutos, limiteProdutos, aba, granularidade]);
 
   useEffect(() => {
     let mounted = true;
@@ -228,7 +299,7 @@ function RelatoriosInner() {
         if (mounted) router.replace('/login');
         return;
       }
-      await carregar();
+      await Promise.all([carregar(), carregarInventario()]);
     };
     init();
     return () => {
@@ -472,6 +543,122 @@ function RelatoriosInner() {
     }
   }
 
+  // ------------- INVENTÁRIO (snapshot atual) -------------
+  // Carrega produtos + estoque aninhado em lotes de 1000, agrega KPIs,
+  // breakdown por fornecedor e lista dos mais antigos ainda em estoque.
+  async function carregarInventario() {
+    setLoadingInv(true);
+    try {
+      type EstoqueLinha = { quantidade: number | null };
+      type ProdLinha = {
+        id: string;
+        descricao: string;
+        cor: string | null;
+        fornecedor: string | null;
+        foto_url: string | null;
+        created_at: string;
+        descontinuado: boolean | null;
+        preco_compra: number | null;
+        preco_venda: number | null;
+        custo_frete: number | null;
+        custo_embalagem: number | null;
+        estoque: EstoqueLinha[] | null;
+      };
+
+      const PAGE = 1000;
+      let todos: ProdLinha[] = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from('produtos')
+          .select('id, descricao, cor, fornecedor, foto_url, created_at, descontinuado, preco_compra, preco_venda, custo_frete, custo_embalagem, estoque(quantidade)')
+          .order('created_at', { ascending: true })
+          .range(from, from + PAGE - 1);
+        if (error) throw error;
+        const lote = ((data as unknown) as ProdLinha[] | null) ?? [];
+        todos = todos.concat(lote);
+        if (lote.length < PAGE) break;
+      }
+
+      const produtos: ProdutoInventario[] = todos.map((p) => {
+        const qtd = (p.estoque ?? []).reduce((a, e) => a + (Number(e.quantidade) || 0), 0);
+        const custo_unit = (Number(p.preco_compra) || 0) + (Number(p.custo_frete) || 0) + (Number(p.custo_embalagem) || 0);
+        const preco_venda = Number(p.preco_venda) || 0;
+        return {
+          id: p.id,
+          descricao: p.descricao || '(sem descrição)',
+          cor: p.cor,
+          fornecedor: (p.fornecedor || '').trim() || 'Sem fornecedor',
+          foto_url: p.foto_url,
+          created_at: p.created_at,
+          descontinuado: !!p.descontinuado,
+          custo_unit,
+          preco_venda,
+          qtd,
+        };
+      });
+
+      // KPIs globais — considera apenas produtos NÃO descontinuados com estoque > 0
+      let pecas = 0, skusComEstoque = 0;
+      let valorCusto = 0, valorVenda = 0;
+      let skusIncompletos = 0;
+      let descontinuadosComEstoque = 0, pecasDescontinuadas = 0;
+      const porForn = new Map<string, FornecedorInventario>();
+      const descontinuadosLista: ProdutoInventario[] = [];
+
+      for (const p of produtos) {
+        if (p.qtd <= 0) continue;
+        if (p.descontinuado) {
+          descontinuadosComEstoque += 1;
+          pecasDescontinuadas += p.qtd;
+          descontinuadosLista.push(p);
+          continue;
+        }
+        pecas += p.qtd;
+        skusComEstoque += 1;
+        const vCusto = p.custo_unit * p.qtd;
+        const vVenda = p.preco_venda * p.qtd;
+        valorCusto += vCusto;
+        valorVenda += vVenda;
+        if (p.custo_unit <= 0 || p.preco_venda <= 0) skusIncompletos += 1;
+
+        const f = porForn.get(p.fornecedor) ?? { fornecedor: p.fornecedor, qtd: 0, valorCusto: 0, valorVenda: 0, lucro: 0, skus: 0 };
+        f.qtd += p.qtd;
+        f.valorCusto += vCusto;
+        f.valorVenda += vVenda;
+        f.lucro += Math.max(0, vVenda - vCusto);
+        f.skus += 1;
+        porForn.set(p.fornecedor, f);
+      }
+
+      const lucroPotencial = Math.max(0, valorVenda - valorCusto);
+      setInvKpis({
+        pecas, skusComEstoque, valorCusto, valorVenda, lucroPotencial,
+        skusIncompletos, descontinuadosComEstoque, pecasDescontinuadas,
+      });
+
+      const porFornArr = Array.from(porForn.values()).sort((a, b) => b.valorCusto - a.valorCusto);
+      setInvPorFornecedor(porFornArr);
+
+      // Mais antigos ainda em estoque (top 10 — já vem ordenado ASC por created_at)
+      const antigos = produtos
+        .filter((p) => p.qtd > 0 && !p.descontinuado)
+        .slice(0, 10);
+      setInvMaisAntigos(antigos);
+      // Descontinuados ordenados por maior valor preso (custo total) primeiro
+      descontinuadosLista.sort((a, b) => (b.custo_unit * b.qtd) - (a.custo_unit * a.qtd));
+      setInvDescontinuados(descontinuadosLista);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('inventário:', msg);
+      setInvKpis({ pecas: 0, skusComEstoque: 0, valorCusto: 0, valorVenda: 0, lucroPotencial: 0, skusIncompletos: 0, descontinuadosComEstoque: 0, pecasDescontinuadas: 0 });
+      setInvPorFornecedor([]);
+      setInvMaisAntigos([]);
+      setInvDescontinuados([]);
+    } finally {
+      setLoadingInv(false);
+    }
+  }
+
   // Nota: com bucket 'produtos' público, não precisamos assinar URLs.
   // As thumbs são derivadas síncronamente de foto_url via thumbUrlFromFotoUrl().
 
@@ -494,12 +681,50 @@ function RelatoriosInner() {
     return suppAgg[0] || null;
   }, [suppAgg]);
 
+  // --- Granularidade: agrega a série diária em semanal (segunda a domingo) ou mensal ---
+  const seriesAgrupada = useMemo<Array<{ day: string; total: number; label: string }>>(() => {
+    if (series.length === 0) return [];
+    const MESES_ABR = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+    const fmtDiaMes = (iso: string) => {
+      const [, m, d] = iso.split('-');
+      return `${d}/${m}`;
+    };
+    if (granularidade === 'dia') {
+      return series.map((p) => ({ day: p.day, total: p.total, label: fmtDiaMes(p.day) }));
+    }
+    // Para semanal: chave = segunda-feira da semana (ISO-like, dow 1=seg)
+    const mondayOf = (iso: string): string => {
+      const [y, m, d] = iso.split('-').map(Number);
+      const dt = new Date(y, m - 1, d);
+      const dow = dt.getDay(); // 0=dom, 1=seg, ..., 6=sáb
+      const diff = dow === 0 ? -6 : 1 - dow;
+      dt.setDate(dt.getDate() + diff);
+      return toISODateLocal(dt);
+    };
+    const mapTot = new Map<string, number>();
+    for (const p of series) {
+      const key = granularidade === 'semana' ? mondayOf(p.day) : p.day.slice(0, 7); // YYYY-MM
+      mapTot.set(key, (mapTot.get(key) ?? 0) + p.total);
+    }
+    const sorted = Array.from(mapTot.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    return sorted.map(([k, total]) => {
+      let label: string;
+      if (granularidade === 'semana') {
+        label = fmtDiaMes(k);
+      } else {
+        const [y, m] = k.split('-');
+        label = `${MESES_ABR[parseInt(m, 10) - 1]}/${y.slice(2)}`;
+      }
+      return { day: k, total, label };
+    });
+  }, [series, granularidade]);
+
   // --- Chart tooltip (fix: nunca sair do container) ---
   const maxBar = useMemo(() => {
     let m = 0;
-    for (const p of series) m = Math.max(m, p.total);
+    for (const p of seriesAgrupada) m = Math.max(m, p.total);
     return m || 1;
-  }, [series]);
+  }, [seriesAgrupada]);
 
   const hideTip = () => setTip(null);
 
@@ -539,11 +764,33 @@ function RelatoriosInner() {
               Relatórios <span className="text-pink-600">Compras</span>
             </h1>
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mt-1">
-              Itens e fornecedores mais vendidos + evolução diária
+              {aba === 'vendas' ? 'Vendas, lucros e crediário' : 'Estoque parado, idade e descontinuados'}
             </p>
           </div>
         </div>
 
+        {/* ABAS */}
+        <div className="flex gap-2 bg-slate-950 border border-slate-800 rounded-xl p-1">
+          <button
+            onClick={() => setAba('vendas')}
+            className={`flex-1 py-2.5 rounded-lg text-[11px] font-black uppercase tracking-widest transition active:scale-95 ${aba === 'vendas' ? 'bg-pink-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+          >
+            📈 Vendas
+          </button>
+          <button
+            onClick={() => setAba('inventario')}
+            className={`flex-1 py-2.5 rounded-lg text-[11px] font-black uppercase tracking-widest transition active:scale-95 flex items-center justify-center gap-1 ${aba === 'inventario' ? 'bg-amber-500 text-slate-950 shadow-lg' : 'text-slate-400 hover:text-white'}`}
+          >
+            📦 Inventário
+            {invKpis.descontinuadosComEstoque > 0 && (
+              <span className={`${aba === 'inventario' ? 'bg-slate-950 text-red-400' : 'bg-red-950/60 text-red-300 border border-red-900/50'} rounded-full px-1.5 text-[9px] font-black`}>
+                {invKpis.descontinuadosComEstoque}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {aba === 'vendas' && (
         <div className="flex flex-col md:flex-row gap-3">
           <div className="flex gap-2 flex-1">
             <input
@@ -562,7 +809,7 @@ function RelatoriosInner() {
 
           <div className="flex gap-2">
             <button
-              onClick={carregar}
+              onClick={() => { carregar(); carregarInventario(); }}
               className="flex-1 bg-pink-600 text-white px-6 py-2 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 hover:bg-pink-500 transition"
             >
               Atualizar
@@ -576,11 +823,14 @@ function RelatoriosInner() {
             </button>
           </div>
         </div>
+        )}
 
         {errorMsg && <div className="text-xs font-bold text-red-400">{errorMsg}</div>}
       </header>
 
       <main className="max-w-4xl mx-auto p-4 space-y-6">
+        {aba === 'vendas' && (
+        <>
         {/* KPIs úteis */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-lg flex flex-col justify-between">
@@ -633,7 +883,223 @@ function RelatoriosInner() {
             Em aberto e vencido: saldo total atual • Recebido: pela data de pagamento dentro do período filtrado
           </p>
         </div>
+        </>
+        )}
 
+        {aba === 'inventario' && (
+        <>
+        {/* INVENTÁRIO — snapshot atual (não depende do período) */}
+        <section className="bg-slate-900 rounded-2xl border border-slate-800 shadow-lg overflow-hidden">
+          <div className="p-5 border-b border-slate-800 flex items-end justify-between gap-3">
+            <div>
+              <span className="text-[10px] font-black text-amber-400 uppercase tracking-widest">Inventário</span>
+              <p className="font-black italic text-lg uppercase tracking-tighter">
+                O que está <span className="text-amber-400">parado</span>
+              </p>
+            </div>
+            <span className="text-[9px] font-bold text-slate-600 uppercase tracking-widest text-right leading-tight">Snapshot atual<br/>independe do período</span>
+          </div>
+
+          {/* 4 KPIs */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-5">
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-col justify-between gap-1">
+              <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Peças em estoque</span>
+              <p className="text-base md:text-xl font-black text-white truncate">{loadingInv ? '—' : invKpis.pecas.toLocaleString('pt-BR')}</p>
+              <span className="text-[9px] font-bold text-slate-600 uppercase">{loadingInv ? '' : `${invKpis.skusComEstoque} SKUs`}</span>
+            </div>
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-col justify-between gap-1">
+              <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Investido (custo)</span>
+              <p className="text-sm md:text-lg font-black text-white truncate">{loadingInv ? '—' : formatBRL(invKpis.valorCusto)}</p>
+              <span className="text-[9px] font-bold text-slate-600 uppercase">dinheiro preso</span>
+            </div>
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-col justify-between gap-1">
+              <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">A faturar</span>
+              <p className="text-sm md:text-lg font-black text-white truncate">{loadingInv ? '—' : formatBRL(invKpis.valorVenda)}</p>
+              <span className="text-[9px] font-bold text-slate-600 uppercase">se vender tudo</span>
+            </div>
+            <div className="bg-slate-950 p-3 rounded-xl border border-emerald-900/50 flex flex-col justify-between gap-1">
+              <span className="text-[9px] font-black text-emerald-400 uppercase tracking-widest">Lucro potencial</span>
+              <p className="text-sm md:text-lg font-black text-emerald-400 truncate">{loadingInv ? '—' : formatBRL(invKpis.lucroPotencial)}</p>
+              <span className="text-[9px] font-bold text-slate-600 uppercase">a realizar</span>
+            </div>
+          </div>
+
+          {/* Alerta de cadastro incompleto (badge inline) */}
+          {!loadingInv && invKpis.skusIncompletos > 0 && (
+            <div className="px-5 pb-3">
+              <span className="text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-lg bg-amber-950/40 text-amber-300 border border-amber-900/50">
+                ⚠ {invKpis.skusIncompletos} SKU(s) sem preço/custo cadastrado — não entram no cálculo
+              </span>
+            </div>
+          )}
+
+          {/* CARTÃO COLAPSÁVEL: Descontinuados com estoque */}
+          {!loadingInv && (() => {
+            const temProblema = invKpis.descontinuadosComEstoque > 0;
+            const borda = temProblema ? 'border-red-900/60' : 'border-emerald-900/50';
+            const bgHeader = temProblema ? 'bg-red-950/30 hover:bg-red-950/50' : 'bg-emerald-950/20 hover:bg-emerald-950/30';
+            const corTexto = temProblema ? 'text-red-300' : 'text-emerald-300';
+            const corNum = temProblema ? 'text-red-400' : 'text-emerald-400';
+            const icone = temProblema ? '⚠' : '✓';
+            return (
+              <div className="px-5 pb-5">
+                <div className={`border ${borda} rounded-xl overflow-hidden`}>
+                  <button
+                    type="button"
+                    onClick={() => temProblema && setDescontinuadosAberto((v) => !v)}
+                    disabled={!temProblema}
+                    className={`w-full ${bgHeader} px-4 py-3 flex items-center gap-3 text-left transition active:scale-[0.995] ${!temProblema ? 'cursor-default' : ''}`}
+                  >
+                    <span className={`text-base ${corNum}`}>{icone}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-[11px] font-black uppercase tracking-widest ${corTexto}`}>
+                        Descontinuados com estoque
+                      </p>
+                      <p className="text-[10px] font-bold text-slate-400 mt-0.5">
+                        {temProblema
+                          ? `${invKpis.descontinuadosComEstoque} SKU(s) · ${invKpis.pecasDescontinuadas} peça(s) ainda em estoque`
+                          : 'Tudo em ordem — nenhum item descontinuado com estoque'}
+                      </p>
+                    </div>
+                    {temProblema && (
+                      <span className={`text-xs font-black ${corTexto}`}>{descontinuadosAberto ? '▲' : '▼'}</span>
+                    )}
+                  </button>
+                  {temProblema && descontinuadosAberto && (
+                    <div className="divide-y divide-slate-800/60 bg-slate-950/40">
+                      {invDescontinuados.map((p) => {
+                        const thumbUrl = thumbUrlFromFotoUrl(p.foto_url || '');
+                        const thumbPath = extractPath(thumbUrl);
+                        const custoTotal = p.custo_unit * p.qtd;
+                        return (
+                          <Link
+                            key={p.id}
+                            href={itemHrefFromRelatorios(p.id, dashQS)}
+                            className="flex items-center gap-3 px-4 py-2.5 hover:bg-red-950/20 active:scale-[0.995] transition"
+                          >
+                            <div className="shrink-0 w-10 h-10 rounded-lg overflow-hidden bg-slate-900 border border-slate-800 relative">
+                              {thumbPath ? (
+                                <Image src={supabase.storage.from('produtos').getPublicUrl(thumbPath).data.publicUrl} alt="" fill sizes="40px" className="object-cover" unoptimized />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center text-slate-700 text-xs">📦</div>
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-black text-white truncate">{p.descricao}</p>
+                              <p className="text-[10px] font-bold text-slate-500 uppercase truncate">
+                                {p.cor ? `${p.cor} · ` : ''}{p.fornecedor}
+                              </p>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <p className="text-xs font-black text-white">{p.qtd} un</p>
+                              {custoTotal > 0 && <p className="text-[9px] font-bold text-slate-500 uppercase">preso {formatBRL(custoTotal)}</p>}
+                            </div>
+                            <span className="text-slate-600 text-sm shrink-0">›</span>
+                          </Link>
+                        );
+                      })}
+                      <div className="px-4 py-2 bg-slate-950/60 text-[9px] font-bold uppercase tracking-widest text-slate-500 leading-relaxed">
+                        Toque num item para abrir e revisar: reativar o cadastro, zerar o estoque ou colocar em promoção.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* POR FORNECEDOR */}
+          <div className="px-5 pb-5">
+            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Dinheiro preso por fornecedor</h3>
+            {loadingInv ? (
+              <div className="py-6 opacity-50 animate-pulse text-xs font-bold uppercase">Carregando...</div>
+            ) : invPorFornecedor.length === 0 ? (
+              <div className="py-6 text-slate-500 text-xs font-bold uppercase text-center">Sem estoque cadastrado</div>
+            ) : (
+              <div className="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-800/60">
+                {invPorFornecedor.slice(0, 5).map((f) => {
+                  const pct = invKpis.valorCusto > 0 ? (f.valorCusto / invKpis.valorCusto) * 100 : 0;
+                  return (
+                    <div key={f.fornecedor} className="px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-black text-white truncate flex-1 min-w-0">{f.fornecedor}</span>
+                        <span className="text-xs font-black text-white shrink-0">{formatBRL(f.valorCusto)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-[10px] font-bold text-slate-500 uppercase mt-0.5">
+                        <span>{f.skus} SKUs · {f.qtd} peças</span>
+                        <span className="text-amber-400">lucro {formatBRL(f.lucro)}</span>
+                      </div>
+                      <div className="mt-1.5 h-1 bg-slate-800 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-amber-500 to-pink-500" style={{ width: `${Math.min(100, pct)}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+                {invPorFornecedor.length > 5 && (
+                  <div className="px-3 py-2 text-[9px] font-bold text-slate-600 uppercase tracking-widest">
+                    + {invPorFornecedor.length - 5} fornecedor(es) com estoque menor
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* MAIS ANTIGOS AINDA EM ESTOQUE */}
+          <div className="px-5 pb-5">
+            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Candidatos a promoção · mais antigos em estoque</h3>
+            {loadingInv ? (
+              <div className="py-6 opacity-50 animate-pulse text-xs font-bold uppercase">Carregando...</div>
+            ) : invMaisAntigos.length === 0 ? (
+              <div className="py-6 text-slate-500 text-xs font-bold uppercase text-center">Sem itens</div>
+            ) : (
+              <div className="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-800/60">
+                {invMaisAntigos.map((p) => {
+                  const dias = Math.floor((Date.now() - new Date(p.created_at).getTime()) / (1000 * 60 * 60 * 24));
+                  const thumbUrl = thumbUrlFromFotoUrl(p.foto_url || '');
+                  const thumbPath = extractPath(thumbUrl);
+                  const custoTotal = p.custo_unit * p.qtd;
+                  return (
+                    <Link
+                      key={p.id}
+                      href={itemHrefFromRelatorios(p.id, dashQS)}
+                      className="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-900/60 active:scale-[0.995] transition"
+                    >
+                      <div className="shrink-0 w-10 h-10 rounded-lg overflow-hidden bg-slate-900 border border-slate-800 relative">
+                        {thumbPath ? (
+                          <Image src={supabase.storage.from('produtos').getPublicUrl(thumbPath).data.publicUrl} alt="" fill sizes="40px" className="object-cover" unoptimized />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-slate-700 text-xs">📦</div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-black text-white truncate">{p.descricao}</span>
+                          {dias >= 180 && <span className="text-[8px] font-black uppercase px-1.5 py-0.5 rounded bg-red-950/40 text-red-300 border border-red-900/50 shrink-0">6+ meses</span>}
+                        </div>
+                        <p className="text-[10px] font-bold text-slate-500 uppercase truncate">
+                          {p.cor ? `${p.cor} · ` : ''}{p.fornecedor} · há {dias} dias
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="text-xs font-black text-white">{p.qtd} un</p>
+                        <p className="text-[9px] font-bold text-slate-500 uppercase">preso {formatBRL(custoTotal)}</p>
+                        {p.preco_venda > 0 && <p className="text-[9px] font-bold text-amber-400 uppercase">venda {formatBRL(p.preco_venda)}</p>}
+                      </div>
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+            <p className="text-[9px] font-bold text-slate-600 uppercase tracking-widest mt-2">
+              Toque num item para abrir e editar. Idade = tempo desde o cadastro do SKU, não desde a última reposição.
+            </p>
+          </div>
+        </section>
+        </>
+        )}
+
+        {aba === 'vendas' && (
+        <>
         {/* Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-lg">
@@ -674,17 +1140,31 @@ function RelatoriosInner() {
           </div>
         </div>
 
-        {/* Gráfico diário (tooltip fixado dentro) */}
+        {/* Gráfico de evolução — toggle dia/semana/mês */}
         <div className="bg-slate-900 p-4 md:p-6 rounded-2xl border border-slate-800 shadow-lg overflow-hidden">
-          <div className="flex items-end justify-between gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
             <div>
-              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Vendas por dia</span>
+              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                {granularidade === 'dia' ? 'Vendas por dia' : granularidade === 'semana' ? 'Vendas por semana' : 'Vendas por mês'}
+              </span>
               <p className="font-black italic text-lg uppercase tracking-tighter">
-                Evolução <span className="text-pink-600">diária</span>
+                <span className="text-pink-600">Evolução</span>
               </p>
             </div>
-            <div className="text-[10px] font-black tracking-widest uppercase text-slate-500">
-              Toque/hover para ver valor
+            <div className="flex items-center gap-2">
+              <div className="flex gap-1 bg-slate-950 border border-slate-800 rounded-lg p-1">
+                {(['dia', 'semana', 'mes'] as const).map((g) => (
+                  <button
+                    key={g}
+                    onClick={() => { hideTip(); setGranularidade(g); }}
+                    className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase tracking-widest transition active:scale-95 ${
+                      granularidade === g ? 'bg-pink-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {g === 'dia' ? 'Dia' : g === 'semana' ? 'Semana' : 'Mês'}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -692,14 +1172,14 @@ function RelatoriosInner() {
             <div className="text-center py-10 opacity-50 animate-pulse">
               <p className="text-xs font-bold uppercase">Carregando gráfico...</p>
             </div>
-          ) : series.length === 0 ? (
+          ) : seriesAgrupada.length === 0 ? (
             <div className="text-center py-12 opacity-30">
               <span className="text-4xl grayscale">📈</span>
               <p className="mt-2 font-bold">Sem dados no período.</p>
             </div>
           ) : (
             <div className="mt-5 overflow-x-auto">
-              <div ref={chartWrapRef} className="relative min-w-[720px]">
+              <div ref={chartWrapRef} className={`relative ${seriesAgrupada.length > 20 ? 'min-w-[720px]' : ''}`}>
                 {/* tooltip (nunca sai do container; se barra muito alta, mostra "inside") */}
                 {tip && (
                   <div
@@ -715,27 +1195,36 @@ function RelatoriosInner() {
                   </div>
                 )}
 
-                <div className="h-44 flex items-end gap-2">
-                  {series.map((p) => {
-                    const h = Math.max(2, Math.round((p.total / maxBar) * 160));
+                <div className="h-56 flex items-end gap-2">
+                  {seriesAgrupada.map((p) => {
+                    const h = Math.max(2, Math.round((p.total / maxBar) * 150));
+                    const tipLabel =
+                      granularidade === 'semana' ? `Semana de ${p.label}` :
+                      granularidade === 'mes' ? p.label :
+                      p.label;
+                    const valorCompacto = formatCompactBR(p.total);
                     return (
-                      <div key={p.day} className="flex-1 min-w-[24px] flex flex-col items-center gap-2">
+                      <div key={p.day} className="flex-1 min-w-[24px] flex flex-col items-center gap-1">
                         <button
                           type="button"
-                          className="w-full flex items-end justify-center focus:outline-none"
-                          onMouseEnter={(e) => showTipFor(p.day, p.total, e.currentTarget)}
-                          onMouseMove={(e) => showTipFor(p.day, p.total, e.currentTarget)}
+                          className="w-full flex flex-col items-center justify-end focus:outline-none"
+                          onMouseEnter={(e) => showTipFor(tipLabel, p.total, e.currentTarget)}
+                          onMouseMove={(e) => showTipFor(tipLabel, p.total, e.currentTarget)}
                           onMouseLeave={hideTip}
                           onClick={(e) => {
-                            if (tip?.day === p.day) hideTip();
-                            else showTipFor(p.day, p.total, e.currentTarget);
+                            if (tip?.day === tipLabel) hideTip();
+                            else showTipFor(tipLabel, p.total, e.currentTarget);
                           }}
-                          aria-label={`${p.day}: ${formatBRL(p.total)}`}
+                          aria-label={`${tipLabel}: ${formatBRL(p.total)}`}
                         >
+                          {/* Rótulo com valor compacto acima da barra (sumido para dia zerado) */}
+                          <div className="text-[9px] font-black tracking-widest text-slate-300 h-3.5 leading-none mb-1">
+                            {valorCompacto}
+                          </div>
                           <div className="w-4 rounded-md bg-pink-500/90" style={{ height: h }} />
                         </button>
                         <div className="text-[9px] text-slate-500 font-black tracking-widest uppercase">
-                          {p.day.slice(5).replace('-', '/')}
+                          {p.label}
                         </div>
                       </div>
                     );
@@ -987,6 +1476,8 @@ function RelatoriosInner() {
             </div>
           )}
         </div>
+        </>
+        )}
       </main>
 
       {/* NAV (Relatórios ativo) */}

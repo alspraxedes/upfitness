@@ -69,6 +69,18 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
   const searchParams = useSearchParams();
   const qs = searchParams.toString();
   const dashHref = qs ? `/?${qs}` : '/';
+  // Volta para a página que trouxe o usuário até aqui (quando informado).
+  // Hoje: ?from=relatorios → volta para /relatorios preservando demais params.
+  const backHref = (() => {
+    const from = searchParams.get('from');
+    if (!from) return dashHref;
+    const sp = new URLSearchParams(qs);
+    sp.delete('from');
+    const rest = sp.toString();
+    const base = from === 'relatorios' ? '/relatorios' : dashHref;
+    if (from !== 'relatorios') return dashHref;
+    return rest ? `${base}?${rest}` : base;
+  })();
 
   // Refs (foto)
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -668,7 +680,7 @@ const uploadFoto = async (file: File) => {
         <div className="flex items-end justify-between gap-4">
           <div className="flex items-end gap-3">
             <Link
-              href={dashHref}
+              href={backHref}
               className="w-12 h-12 bg-slate-900 border border-slate-800 text-white rounded-2xl flex items-center justify-center text-xl shadow-lg active:scale-90 transition-transform"
               aria-label="Voltar"
               title="Voltar"
