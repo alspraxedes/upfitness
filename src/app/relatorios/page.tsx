@@ -992,13 +992,13 @@ function RelatoriosInner() {
                             </div>
                             <div className="flex-1 min-w-0">
                               <p className="text-xs font-black text-white truncate">{p.descricao}</p>
-                              <p className="text-[10px] font-bold text-slate-500 uppercase truncate">
+                              <p className="text-[10px] font-bold text-slate-500 uppercase truncate mt-0.5">
                                 {p.cor ? `${p.cor} · ` : ''}{p.fornecedor}
                               </p>
                             </div>
                             <div className="text-right shrink-0">
-                              <p className="text-xs font-black text-white">{p.qtd} un</p>
-                              {custoTotal > 0 && <p className="text-[9px] font-bold text-slate-500 uppercase">preso {formatBRL(custoTotal)}</p>}
+                              <p className="text-xs font-black text-white leading-tight">{p.qtd} un</p>
+                              {custoTotal > 0 && <p className="text-[9px] font-bold text-slate-500 uppercase leading-tight mt-0.5">preso {formatBRL(custoTotal)}</p>}
                             </div>
                             <span className="text-slate-600 text-sm shrink-0">›</span>
                           </Link>
@@ -1087,6 +1087,11 @@ function RelatoriosInner() {
                   const thumbUrl = thumbUrlFromFotoUrl(p.foto_url || '');
                   const thumbPath = extractPath(thumbUrl);
                   const custoTotal = p.custo_unit * p.qtd;
+                  // Badge de idade sempre visível, com faixa colorida por tempo
+                  const idadeTom =
+                    dias >= 180 ? 'bg-red-950/50 text-red-300 border-red-900/60' :
+                    dias >= 90  ? 'bg-amber-950/50 text-amber-300 border-amber-900/60' :
+                                  'bg-slate-800 text-slate-300 border-slate-700';
                   return (
                     <Link
                       key={p.id}
@@ -1101,18 +1106,20 @@ function RelatoriosInner() {
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-black text-white truncate">{p.descricao}</span>
-                          {dias >= 180 && <span className="text-[8px] font-black uppercase px-1.5 py-0.5 rounded bg-red-950/40 text-red-300 border border-red-900/50 shrink-0">6+ meses</span>}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-xs font-black text-white truncate flex-1 min-w-0">{p.descricao}</span>
+                          <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded border shrink-0 ${idadeTom}`} title={`há ${dias} dias no sistema`}>
+                            {dias}d
+                          </span>
                         </div>
-                        <p className="text-[10px] font-bold text-slate-500 uppercase truncate">
-                          {p.cor ? `${p.cor} · ` : ''}{p.fornecedor} · há {dias} dias
+                        <p className="text-[10px] font-bold text-slate-500 uppercase truncate mt-0.5">
+                          {p.cor ? `${p.cor} · ` : ''}{p.fornecedor}
                         </p>
                       </div>
                       <div className="text-right shrink-0">
-                        <p className="text-xs font-black text-white">{p.qtd} un</p>
-                        <p className="text-[9px] font-bold text-slate-500 uppercase">preso {formatBRL(custoTotal)}</p>
-                        {p.preco_venda > 0 && <p className="text-[9px] font-bold text-amber-400 uppercase">venda {formatBRL(p.preco_venda)}</p>}
+                        <p className="text-xs font-black text-white leading-tight">{p.qtd} un</p>
+                        <p className="text-[9px] font-bold text-slate-500 uppercase leading-tight mt-0.5">preso {formatBRL(custoTotal)}</p>
+                        {p.preco_venda > 0 && <p className="text-[9px] font-bold text-amber-400 uppercase leading-tight">venda {formatBRL(p.preco_venda)}</p>}
                       </div>
                     </Link>
                   );
