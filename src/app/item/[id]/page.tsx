@@ -972,6 +972,14 @@ const uploadFoto = async (file: File) => {
                   </div>
                 </div>
 
+                {/* Soma Compra + Frete + Embalagem — somente leitura, em tempo real */}
+                <div className="bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2 flex items-center justify-between">
+                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Custo total</span>
+                  <span className="text-sm font-black text-white">
+                    {formatBRL(formData.preco_compra + formData.custo_frete + formData.custo_embalagem)}
+                  </span>
+                </div>
+
                 <div className="flex items-center gap-4 pt-2">
                   <div className="flex-1 space-y-1">
                     <label className="text-[9px] font-black text-blue-400 uppercase ml-1">Preço Venda</label>

@@ -727,6 +727,18 @@ function CadastroPageInner() {
               </div>
             </div>
 
+            {/* Soma Custo + Frete + Embalagem — somente leitura, em tempo real */}
+            <div className="mt-3 bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2 flex items-center justify-between">
+              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Custo total</span>
+              <span className="text-sm font-black text-white">
+                {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(
+                  (parseFloat(formData.preco_compra) || 0) +
+                  (parseFloat(formData.custo_frete) || 0) +
+                  (parseFloat(formData.custo_embalagem) || 0)
+                )}
+              </span>
+            </div>
+
             <div className="grid grid-cols-2 gap-4 pt-2">
               <div className="bg-slate-950/50 p-3 rounded-2xl border border-pink-900/30 text-center">
                 <label className="block text-[9px] font-black text-pink-500 mb-1 uppercase tracking-wider">Margem</label>

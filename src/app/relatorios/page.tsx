@@ -231,6 +231,9 @@ function RelatoriosInner() {
   // Granularidade do gráfico de evolução (persistida junto dos outros filtros)
   const [granularidade, setGranularidade] = useState<'dia' | 'semana' | 'mes'>('dia');
 
+  // Quantidade de itens no ranking "Mais antigos ainda em estoque" (até 100)
+  const [limiteAntigos, setLimiteAntigos] = useState(10);
+
   // KPIs
   const [kpis, setKpis] = useState({
     receita: 0,
@@ -280,6 +283,7 @@ function RelatoriosInner() {
         if (typeof parsed?.limiteProdutos === 'number') setLimiteProdutos(Math.min(30, Math.max(3, parsed.limiteProdutos)));
         if (parsed?.aba === 'vendas' || parsed?.aba === 'inventario') setAba(parsed.aba);
         if (parsed?.granularidade === 'dia' || parsed?.granularidade === 'semana' || parsed?.granularidade === 'mes') setGranularidade(parsed.granularidade);
+        if (typeof parsed?.limiteAntigos === 'number') setLimiteAntigos(Math.min(100, Math.max(5, parsed.limiteAntigos)));
       }
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -287,9 +291,9 @@ function RelatoriosInner() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ dataInicio, dataFim, modoProdutos, limiteProdutos, aba, granularidade }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ dataInicio, dataFim, modoProdutos, limiteProdutos, aba, granularidade, limiteAntigos }));
     } catch {}
-  }, [dataInicio, dataFim, modoProdutos, limiteProdutos, aba, granularidade]);
+  }, [dataInicio, dataFim, modoProdutos, limiteProdutos, aba, granularidade, limiteAntigos]);
 
   useEffect(() => {
     let mounted = true;
@@ -640,9 +644,11 @@ function RelatoriosInner() {
       setInvPorFornecedor(porFornArr);
 
       // Mais antigos ainda em estoque (top 10 — já vem ordenado ASC por created_at)
+      // Guarda a lista completa (já ordenada por created_at ASC); o slider
+      // na UI decide quantos exibir, até o teto de 100.
       const antigos = produtos
         .filter((p) => p.qtd > 0 && !p.descontinuado)
-        .slice(0, 10);
+        .slice(0, 100);
       setInvMaisAntigos(antigos);
       // Descontinuados ordenados por maior valor preso (custo total) primeiro
       descontinuadosLista.sort((a, b) => (b.custo_unit * b.qtd) - (a.custo_unit * a.qtd));
@@ -1046,14 +1052,37 @@ function RelatoriosInner() {
 
           {/* MAIS ANTIGOS AINDA EM ESTOQUE */}
           <div className="px-5 pb-5">
-            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Candidatos a promoção · mais antigos em estoque</h3>
+            <div className="flex items-end justify-between gap-3 mb-2 flex-wrap">
+              <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Candidatos a promoção · mais antigos em estoque</h3>
+              {!loadingInv && invMaisAntigos.length > 0 && (
+                <span className="text-[10px] font-black text-amber-400 uppercase tracking-widest shrink-0">
+                  mostrando {Math.min(limiteAntigos, invMaisAntigos.length)} de {invMaisAntigos.length}
+                </span>
+              )}
+            </div>
+            {!loadingInv && invMaisAntigos.length > 5 && (
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 mb-2 flex items-center gap-3">
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest shrink-0">Quantidade</span>
+                <input
+                  type="range"
+                  min={5}
+                  max={Math.min(100, Math.max(5, invMaisAntigos.length))}
+                  step={5}
+                  value={Math.min(limiteAntigos, Math.max(5, invMaisAntigos.length))}
+                  onChange={(e) => setLimiteAntigos(parseInt(e.target.value, 10))}
+                  className="flex-1 accent-amber-500 cursor-pointer"
+                  aria-label="Quantidade de itens no ranking"
+                />
+                <span className="text-sm font-black text-amber-400 w-10 text-right shrink-0">{Math.min(limiteAntigos, invMaisAntigos.length)}</span>
+              </div>
+            )}
             {loadingInv ? (
               <div className="py-6 opacity-50 animate-pulse text-xs font-bold uppercase">Carregando...</div>
             ) : invMaisAntigos.length === 0 ? (
               <div className="py-6 text-slate-500 text-xs font-bold uppercase text-center">Sem itens</div>
             ) : (
               <div className="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-800/60">
-                {invMaisAntigos.map((p) => {
+                {invMaisAntigos.slice(0, limiteAntigos).map((p) => {
                   const dias = Math.floor((Date.now() - new Date(p.created_at).getTime()) / (1000 * 60 * 60 * 24));
                   const thumbUrl = thumbUrlFromFotoUrl(p.foto_url || '');
                   const thumbPath = extractPath(thumbUrl);
