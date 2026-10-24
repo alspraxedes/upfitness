@@ -8,6 +8,8 @@ import { supabase } from '../../../lib/supabase';
 import { getSignedUrlCached } from '../../../lib/signedUrlCache';
 import { gerarThumb, thumbPathFromOriginal, extractStoragePath } from '../../../lib/thumbUtils';
 import PhotoLightbox from '../../components/PhotoLightbox';
+import { ScannerControls } from '../../components/ScannerControls';
+import { startBarcodeScanner, type ScannerSession } from '../../../lib/scanner';
 
 // --- UTILITÁRIOS ---
 const formatBRL = (val: number | string) => {
@@ -87,8 +89,9 @@ export default function DetalheItem({ params }: { params: Promise<{ id: string }
   const streamRef = useRef<MediaStream | null>(null);
 
   // Scanner (EAN)
-  const scannerRef = useRef<any>(null);
-  const zxingRef = useRef<{ reset: () => void } | null>(null);
+  // Scanner (helper compartilhado em src/lib/scanner.ts)
+  const sessionRef = useRef<ScannerSession | null>(null);
+  const [scannerSession, setScannerSession] = useState<ScannerSession | null>(null);
 
   // --- ESTADOS ---
   const [loading, setLoading] = useState(true);
@@ -470,196 +473,43 @@ const uploadFoto = async (file: File) => {
     carregarDados();
   };
 
-  // ✅ Leitor EAN (mesma lógica/config do dashboard)
+  // --- Scanner EAN (via helper compartilhado) ---
   useEffect(() => {
     if (!modalEstoque.aberto || !modalEstoque.scanning) return;
-
-    const elementId = 'reader-ean-edit-direct';
     let cancelled = false;
 
-    const stopAndClear = async (s: any) => {
-      if (!s) return;
-      try {
-        const maybe = s.stop?.();
-        if (maybe && typeof maybe.then === 'function') {
-          await maybe.catch(() => {});
-        }
-      } catch {}
-      try {
-        s.clear?.();
-      } catch {}
-    };
-
-    const start = async () => {
+    (async () => {
       await new Promise((r) => setTimeout(r, 150));
       if (cancelled) return;
-
-      const el = document.getElementById(elementId);
-      if (!el) return;
-
-      el.innerHTML = '';
-      el.classList.remove('hidden');
-
-      const zxingVideo = document.getElementById('zxing-video-ean-edit') as HTMLVideoElement | null;
-      if (zxingVideo) zxingVideo.classList.add('hidden');
-
-      await stopAndClear(scannerRef.current);
-      if (zxingRef.current) {
-        try {
-          zxingRef.current.reset();
-        } catch {}
-        zxingRef.current = null;
-      }
-
-      const hasBarcodeDetector = typeof (window as any).BarcodeDetector !== 'undefined';
-
-      if (!hasBarcodeDetector) {
-        try {
-          const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
-            import('@zxing/browser'),
-            import('@zxing/library'),
-          ]);
-
-          if (cancelled) return;
-          if (!zxingVideo) {
-            console.error('ZXing video element não encontrado.');
-            return;
-          }
-
-          el.classList.add('hidden');
-          zxingVideo.classList.remove('hidden');
-
-          const hints = new Map();
-          hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]);
-
-          const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 200 });
-
-          zxingRef.current = {
-            reset: () => {
-              try {
-                (reader as any).stopContinuousDecode?.();
-              } catch {}
-              try {
-                (reader as any).stopAsyncDecode?.();
-              } catch {}
-              try {
-                const stream = (zxingVideo as any)?.srcObject as MediaStream | null;
-                stream?.getTracks?.().forEach((t) => t.stop());
-                (zxingVideo as any).srcObject = null;
-              } catch {}
-            },
-          };
-
-          const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-          const preferred = devices.find((d: any) => /back|rear|traseira|environment/i.test(d.label)) ?? devices[0];
-
-          reader.decodeFromVideoDevice(preferred?.deviceId, zxingVideo, (result) => {
-            if (cancelled) return;
-            const text = result?.getText?.() ? result.getText() : '';
-            if (text) {
-              const cleaned = String(text).trim();
-              setModalEstoque((p) => ({ ...p, eanAtual: cleaned, scanning: false }));
-              try {
-                zxingRef.current?.reset();
-              } catch {}
-            }
-          });
-
-          return;
-        } catch (err) {
-          console.error('Falha ao iniciar ZXing fallback:', err);
-        }
-      }
-
-      let Html5Qrcode: any;
-      let Formats: any;
-
-      try {
-        const mod = await import('html5-qrcode');
-        if (cancelled) return;
-        Html5Qrcode = mod.Html5Qrcode;
-        Formats = mod.Html5QrcodeSupportedFormats;
-      } catch (err) {
-        console.error('Falha ao carregar html5-qrcode:', err);
-        return;
-      }
-
-      const scanner = new Html5Qrcode(elementId);
-      scannerRef.current = scanner;
-
-      const config: any = {
-        fps: 9,
-        qrbox: { width: 280, height: 120 },
-        aspectRatio: 1.777,
-        disableFlip: true,
-        formatsToSupport: [Formats.EAN_13, Formats.EAN_8],
-        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-        videoConstraints: { width: { ideal: 1280 }, height: { ideal: 720 } },
-      };
-
-      const onDecode = async (decodedText: string) => {
-        if (cancelled) return;
-        const cleaned = String(decodedText || '').trim();
-        if (!cleaned) return;
-        setModalEstoque((p) => ({ ...p, eanAtual: cleaned, scanning: false }));
-        await stopAndClear(scanner);
-      };
-
-      try {
-        const cameras = await Html5Qrcode.getCameras();
-        const preferred = cameras.find((c: any) => /back|rear|traseira|environment/i.test(c.label)) ?? cameras[0];
-
-        await scanner.start({ deviceId: { exact: preferred.id } }, config, onDecode, () => {});
-      } catch (err) {
-        console.error('Falha ao iniciar html5-qrcode:', err);
-        try {
-          await scanner.start({ facingMode: 'environment' }, config, onDecode, () => {});
-        } catch (err2) {
-          console.error('Fallback html5-qrcode falhou:', err2);
-        }
-      }
-    };
-
-    start();
+      const el = document.getElementById('reader-ean-edit-direct');
+      if (el) el.innerHTML = '';
+      const session = await startBarcodeScanner({
+        containerId: 'reader-ean-edit-direct',
+        videoFallbackId: 'zxing-video-ean-edit',
+        onDetect: (text) => {
+          setModalEstoque((p) => ({ ...p, eanAtual: text, scanning: false }));
+        },
+      });
+      if (cancelled) { session.stop(); return; }
+      sessionRef.current = session;
+      setScannerSession(session);
+    })();
 
     return () => {
       cancelled = true;
-      stopAndClear(scannerRef.current);
-
-      if (zxingRef.current) {
-        try {
-          zxingRef.current.reset();
-        } catch {}
-        zxingRef.current = null;
-      }
+      const s = sessionRef.current;
+      sessionRef.current = null;
+      setScannerSession(null);
+      if (s) s.stop();
     };
   }, [modalEstoque.aberto, modalEstoque.scanning]);
 
   // --- Cleanup camera/scanner on unmount ---
   useEffect(() => {
     return () => {
-      try {
-        const s = scannerRef.current;
-        if (s) {
-          try {
-            const maybePromise = s.stop?.();
-            if (maybePromise && typeof (maybePromise as any).then === 'function') {
-              (maybePromise as Promise<void>).catch(() => {});
-            }
-          } catch {}
-          try {
-            s.clear?.();
-          } catch {}
-        }
-      } catch {}
-
-      if (zxingRef.current) {
-        try {
-          zxingRef.current.reset();
-        } catch {}
-        zxingRef.current = null;
-      }
-
+      const s = sessionRef.current;
+      sessionRef.current = null;
+      if (s) s.stop();
       try {
         streamRef.current?.getTracks().forEach((t) => t.stop());
       } catch {}
@@ -1239,6 +1089,7 @@ const uploadFoto = async (file: File) => {
                   <div className="rounded-[2rem] overflow-hidden bg-black border-2 border-pink-500/30 shadow-2xl shadow-pink-500/10 relative mt-2">
                     <video id="zxing-video-ean-edit" className="h-56 w-full object-cover hidden" muted playsInline />
                     <div id="reader-ean-edit-direct" className="h-56 w-full" />
+                    <ScannerControls session={scannerSession} />
                   </div>
                 )}
               </>

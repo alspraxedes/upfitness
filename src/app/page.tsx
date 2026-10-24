@@ -9,6 +9,8 @@ import Image from 'next/image';
 import { thumbUrlFromFotoUrl } from '../lib/thumbUtils';
 import { adicionarAoRascunhoLocal, type ItemCarrinho } from '../lib/carrinho';
 import PhotoLightbox from './components/PhotoLightbox';
+import { ScannerControls } from './components/ScannerControls';
+import { startBarcodeScanner, type ScannerSession } from '../lib/scanner';
 
 // --- UTILITÁRIOS ---
 function formatBRL(v: any) {
@@ -306,7 +308,7 @@ function SwipeableCard({ children, onSwipeAction, disabled }: SwipeableCardProps
   return (
     <div
       ref={containerRef}
-      className="relative rounded-[2.5rem] overflow-hidden touch-pan-y select-none"
+      className="relative rounded overflow-hidden touch-pan-y select-none"
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -317,7 +319,7 @@ function SwipeableCard({ children, onSwipeAction, disabled }: SwipeableCardProps
       {/* Fundo revelado à direita ao arrastar */}
       <div
         aria-hidden
-        className={`absolute inset-y-0 right-0 flex items-center justify-end pr-6 rounded-[2.5rem] transition-colors ${
+        className={`absolute inset-y-0 right-0 flex items-center justify-end pr-6 rounded transition-colors ${
           passingThreshold ? 'bg-emerald-600' : 'bg-pink-600'
         }`}
         style={{ width: `${revealed}px`, opacity: revealed > 4 ? 1 : 0 }}
@@ -441,9 +443,9 @@ export default function Dashboard() {
     [adicionarEstoqueAoRascunho, mostrarToast],
   );
 
-  // Scanner: evita importar html5-qrcode no topo
-  const scannerRef = useRef<any>(null);
-  const zxingRef = useRef<{ reset: () => void } | null>(null);
+  // Scanner (helper compartilhado em src/lib/scanner.ts cuida de iPhone e desktop)
+  const sessionRef = useRef<ScannerSession | null>(null);
+  const [scannerSession, setScannerSession] = useState<ScannerSession | null>(null);
 
   // Keys (sessionStorage)
   const scrollKey = 'dashboard:scrollY';
@@ -703,179 +705,36 @@ export default function Dashboard() {
     return params.toString();
   }, [busca, tamanhosSelecionados, fornecedorSelecionado, esconderZerados]);
 
-  // --- SCANNER ---
+  // --- SCANNER (via helper compartilhado) ---
   useEffect(() => {
     if (!mostrarScanner) return;
-
-    const elementId = 'reader-dashboard-direct';
     let cancelled = false;
 
-    const stopAndClear = async (s: any) => {
-      if (!s) return;
-      try {
-        const maybe = s.stop?.();
-        if (maybe && typeof maybe.then === 'function') {
-          await maybe.catch(() => {});
-        }
-      } catch {}
-      try {
-        s.clear?.();
-      } catch {}
-    };
-
-    const start = async () => {
+    (async () => {
+      // Dá tempo pro DOM montar o container
       await new Promise((r) => setTimeout(r, 150));
       if (cancelled) return;
-
-      const el = document.getElementById(elementId);
-      if (!el) return;
-
-      // garante que o container do html5-qrcode esteja limpo/visível
-      el.innerHTML = '';
-      el.classList.remove('hidden');
-
-      // prepara o video do zxing
-      const zxingVideo = document.getElementById('zxing-video') as HTMLVideoElement | null;
-      if (zxingVideo) zxingVideo.classList.add('hidden');
-
-      await stopAndClear(scannerRef.current);
-      if (zxingRef.current) {
-        try {
-          zxingRef.current.reset();
-        } catch {}
-        zxingRef.current = null;
-      }
-
-      // Detecta suporte a BarcodeDetector (fundamental para 1D no desktop)
-      const hasBarcodeDetector = typeof (window as any).BarcodeDetector !== 'undefined';
-
-      // Se NÃO tiver BarcodeDetector: usar ZXing (desktop fallback)
-      if (!hasBarcodeDetector) {
-        try {
-          const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
-            import('@zxing/browser'),
-            import('@zxing/library'),
-          ]);
-
-          if (cancelled) return;
-
-          if (!zxingVideo) {
-            console.error('ZXing video element não encontrado.');
-            return;
-          }
-
-          // esconde html5-qrcode e mostra o video
-          el.classList.add('hidden');
-          zxingVideo.classList.remove('hidden');
-
-          const hints = new Map();
-          hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]);
-
-          const reader = new BrowserMultiFormatReader(hints, {
-            delayBetweenScanAttempts: 200,
-          });
-          zxingRef.current = {
-            reset: () => {
-              try {
-                (reader as any).stopContinuousDecode?.();
-              } catch {}
-              try {
-                (reader as any).stopAsyncDecode?.();
-              } catch {}
-
-              try {
-                const stream = (zxingVideo as any)?.srcObject as MediaStream | null;
-                stream?.getTracks?.().forEach((t) => t.stop());
-                (zxingVideo as any).srcObject = null;
-              } catch {}
-            },
-          };
-
-          const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-          const preferred = devices.find((d: any) => /back|rear|traseira|environment/i.test(d.label)) ?? devices[0];
-
-          reader.decodeFromVideoDevice(preferred?.deviceId, zxingVideo, (result, err) => {
-            if (cancelled) return;
-            const text = result?.getText?.() ? result.getText() : '';
-            if (text) {
-              const cleaned = String(text).trim();
-              setBusca(cleaned);
-              setMostrarScanner(false);
-              try {
-                zxingRef.current?.reset();
-              } catch {}
-            }
-          });
-
-          return;
-        } catch (err) {
-          console.error('Falha ao iniciar ZXing fallback:', err);
-        }
-      }
-
-      // --- Caminho padrão (iPhone / browsers com BarcodeDetector): html5-qrcode ---
-      let Html5Qrcode: any;
-      let Formats: any;
-
-      try {
-        const mod = await import('html5-qrcode');
-        if (cancelled) return;
-        Html5Qrcode = mod.Html5Qrcode;
-        Formats = mod.Html5QrcodeSupportedFormats;
-      } catch (err) {
-        console.error('Falha ao carregar html5-qrcode:', err);
-        return;
-      }
-
-      const scanner = new Html5Qrcode(elementId);
-      scannerRef.current = scanner;
-
-      const config: any = {
-        fps: 9,
-        qrbox: { width: 280, height: 120 },
-        aspectRatio: 1.777,
-        disableFlip: true,
-        formatsToSupport: [Formats.EAN_13, Formats.EAN_8],
-        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-        videoConstraints: { width: { ideal: 1280 }, height: { ideal: 720 } },
-      };
-
-      const onDecode = async (decodedText: string) => {
-        if (cancelled) return;
-        const cleaned = String(decodedText || '').trim();
-        if (!cleaned) return;
-        setBusca(cleaned);
-        setMostrarScanner(false);
-        await stopAndClear(scanner);
-      };
-
-      try {
-        const cameras = await Html5Qrcode.getCameras();
-        const preferred = cameras.find((c: any) => /back|rear|traseira|environment/i.test(c.label)) ?? cameras[0];
-
-        await scanner.start({ deviceId: { exact: preferred.id } }, config, onDecode, () => {});
-      } catch (err) {
-        console.error('Falha ao iniciar html5-qrcode:', err);
-        try {
-          await scanner.start({ facingMode: 'environment' }, config, onDecode, () => {});
-        } catch (err2) {
-          console.error('Fallback html5-qrcode falhou:', err2);
-        }
-      }
-    };
-
-    start();
+      const el = document.getElementById('reader-dashboard-direct');
+      if (el) el.innerHTML = '';
+      const session = await startBarcodeScanner({
+        containerId: 'reader-dashboard-direct',
+        videoFallbackId: 'zxing-video',
+        onDetect: (text) => {
+          setBusca(text);
+          setMostrarScanner(false);
+        },
+      });
+      if (cancelled) { session.stop(); return; }
+      sessionRef.current = session;
+      setScannerSession(session);
+    })();
 
     return () => {
       cancelled = true;
-      stopAndClear(scannerRef.current);
-
-      if (zxingRef.current) {
-        try {
-          zxingRef.current.reset();
-        } catch {}
-        zxingRef.current = null;
-      }
+      const s = sessionRef.current;
+      sessionRef.current = null;
+      setScannerSession(null);
+      if (s) s.stop();
     };
   }, [mostrarScanner]);
 
@@ -1012,10 +871,10 @@ export default function Dashboard() {
                   id={`produto-${produto.id}`}
                   onClick={() => saveReturnState(produto.id)}
                   onMouseDown={() => saveReturnState(produto.id)}
-                  className="bg-slate-900 rounded-[2.5rem] flex overflow-hidden border border-slate-800/50 min-h-[160px] shadow-xl group active:scale-[0.98] transition-all"
+                  className="bg-slate-900 rounded flex overflow-hidden border border-slate-800/50 min-h-[108px] shadow-xl group active:scale-[0.98] transition-all"
                 >
                   <div
-                    className="w-36 bg-slate-950 relative border-r border-slate-800 flex-shrink-0 cursor-zoom-in"
+                    className="w-28 bg-slate-950 relative border-r border-slate-800 flex-shrink-0 cursor-zoom-in"
                     onClick={(e) => {
                       if (!urlAssinada) return;
                       e.preventDefault();
@@ -1046,48 +905,48 @@ export default function Dashboard() {
                       </div>
                     )}
                     <div
-                      className={`absolute bottom-4 left-4 px-2.5 py-1 rounded-lg font-black text-[10px] shadow-2xl ${
+                      className={`absolute bottom-1.5 left-1.5 px-2 py-0.5 rounded-md font-black text-[10px] shadow-2xl ${
                         total > 0 ? 'bg-emerald-500 text-white' : 'bg-red-600 text-white'
                       }`}
                     >
-                      {total} UN
+                      {total} un
                     </div>
                   </div>
 
-                  <div className="flex-1 p-6 flex flex-col justify-between min-w-0">
-                    <div>
-                      <h2 className="font-bold text-slate-100 text-[13px] uppercase line-clamp-2 leading-tight">{produto.descricao}</h2>
-
-                      <div className="mt-1 flex items-center gap-2 min-w-0">
-                        <span
-                          className="w-3.5 h-3.5 rounded-full border border-white/10 shadow flex-shrink-0"
-                          style={swatch.style}
-                          aria-label={`Cor: ${swatch.aria || 'não informado'}`}
-                          title={produto.cor || ''}
-                        />
-                        <p className="text-[10px] text-slate-600 font-bold uppercase tracking-wide truncate">
-                          {produto.fornecedor || 'Geral'} • {produto.cor}
-                        </p>
-                      </div>
+                  <div className="flex-1 p-3 flex flex-col justify-between min-w-0 gap-1">
+                    {/* Linha 1: título + preço */}
+                    <div className="flex items-start justify-between gap-2 min-w-0">
+                      <h2 className="font-bold text-slate-100 text-[12px] uppercase line-clamp-2 leading-tight flex-1 min-w-0">{produto.descricao}</h2>
+                      <span className="text-sm font-black text-white shrink-0 leading-tight">{formatBRL(produto.preco_venda)}</span>
                     </div>
 
-                    <div className="flex flex-wrap gap-1.5 mt-3">
+                    {/* Linha 2: swatch + fornecedor · cor */}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full border border-white/10 shadow shrink-0"
+                        style={swatch.style}
+                        aria-label={`Cor: ${swatch.aria || 'não informado'}`}
+                        title={produto.cor || ''}
+                      />
+                      <p className="text-[9px] text-slate-500 font-bold uppercase tracking-wide truncate">
+                        {produto.fornecedor || 'Geral'} • {produto.cor}
+                      </p>
+                    </div>
+
+                    {/* Linha 3: tamanhos (compacto) */}
+                    <div className="flex flex-wrap gap-1">
                       {produto.estoque?.map((item: any, i: number) => (
                         <span
                           key={i}
-                          className={`text-[9px] px-2 py-1 rounded-lg font-black border ${
+                          className={`text-[9px] px-1.5 py-0.5 rounded-md font-black border leading-none ${
                             item.quantidade > 0
                               ? 'bg-slate-800 border-slate-700 text-slate-300'
                               : 'bg-transparent border-slate-800 text-slate-700 border-dashed'
                           }`}
                         >
-                          {item.tamanho?.nome} {item.quantidade > 0 && `· ${item.quantidade}`}
+                          {item.tamanho?.nome}{item.quantidade > 0 && `·${item.quantidade}`}
                         </span>
                       ))}
-                    </div>
-
-                    <div className="mt-3 flex justify-end items-end">
-                      <span className="text-base font-black text-white">{formatBRL(produto.preco_venda)}</span>
                     </div>
                   </div>
                 </Link>
@@ -1296,6 +1155,9 @@ export default function Dashboard() {
 
             {/* html5-qrcode usa esta div */}
             <div id="reader-dashboard-direct" className="h-[65vh] w-full" />
+
+            {/* Controles: lente ativa, lanterna, mira pulsante, tap-to-focus, dica */}
+            <ScannerControls session={scannerSession} />
           </div>
 
           {scannerTips}

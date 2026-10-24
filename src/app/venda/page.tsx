@@ -11,6 +11,8 @@ import { playBeep } from '../../lib/sound';
 import { RASCUNHO_LOCAL_KEY, type ItemCarrinho } from '../../lib/carrinho';
 
 import ReciboModal from '../components/ReciboModal';
+import { ScannerControls } from '../components/ScannerControls';
+import { startBarcodeScanner, type ScannerSession } from '../../lib/scanner';
 
 // --- TIPOS ---
 type EstoqueItem = {
@@ -279,6 +281,9 @@ function VendaPageInner() {
   const [zoom, setZoom] = useState(1);
   const [croppedAreaPixels, setCroppedAreaPixels] = useState<AreaCrop | null>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  // Scanner da câmera (helper compartilhado em src/lib/scanner.ts)
+  const scannerSessionRef = useRef<ScannerSession | null>(null);
+  const [scannerSession, setScannerSession] = useState<ScannerSession | null>(null);
 
   // Computa a URL pública da thumb a partir da foto_url original.
   // As thumbs ficam em produtos/thumbs/ (geradas no upload ou retroativamente).
@@ -434,30 +439,42 @@ function VendaPageInner() {
   }, [pagamento.valorFinal, pagamentos.length]);
 
   useEffect(() => {
-    if (mostrarScanner) {
-      const elementId = 'reader-venda-direct';
-      const t = setTimeout(() => {
-        if (!document.getElementById(elementId)) return;
-        const html5QrCode = new Html5Qrcode(elementId);
-        scannerRef.current = html5QrCode;
-        html5QrCode.start(
-          { facingMode: 'environment' },
-          { fps: 30, qrbox: { width: 250, height: 100 }, aspectRatio: 1.0 },
-          (decodedText) => { handleScanSucesso(decodedText); fecharScanner(); },
-          () => {}
-        ).catch((err) => { console.error('Erro Câmera:', err); setMostrarScanner(false); });
-      }, 300);
-      return () => clearTimeout(t);
-    }
+    if (!mostrarScanner) return;
+    let cancelled = false;
+
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      if (cancelled) return;
+      const el = document.getElementById('reader-venda-direct');
+      if (el) el.innerHTML = '';
+      const session = await startBarcodeScanner({
+        containerId: 'reader-venda-direct',
+        videoFallbackId: 'zxing-video-venda',
+        onDetect: (text) => {
+          handleScanSucesso(text);
+          fecharScanner();
+        },
+      });
+      if (cancelled) { session.stop(); return; }
+      scannerSessionRef.current = session;
+      setScannerSession(session);
+    })();
+
+    return () => {
+      cancelled = true;
+      const s = scannerSessionRef.current;
+      scannerSessionRef.current = null;
+      setScannerSession(null);
+      if (s) s.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mostrarScanner]);
 
   const fecharScanner = async () => {
-    if (scannerRef.current) {
-      try {
-        if ((scannerRef.current as any).isScanning) await scannerRef.current.stop();
-        scannerRef.current.clear();
-      } catch (e) { console.log(e); }
-    }
+    const s = scannerSessionRef.current;
+    scannerSessionRef.current = null;
+    setScannerSession(null);
+    if (s) await s.stop();
     setMostrarScanner(false);
   };
 
@@ -1697,7 +1714,11 @@ setMostrarSugestoes(false);
         <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-6 backdrop-blur-md">
           <div className="w-full max-w-sm bg-slate-900 p-6 rounded-3xl border border-slate-800 shadow-2xl relative">
             <h3 className="text-center font-black uppercase text-white mb-4 text-sm">Aponte para o Código</h3>
-            <div id="reader-venda-direct" className="w-full rounded-2xl overflow-hidden border-2 border-pink-500 bg-black h-64"></div>
+            <div className="relative w-full rounded-2xl overflow-hidden border-2 border-pink-500 bg-black h-64">
+              <video id="zxing-video-venda" className="h-full w-full object-cover hidden" muted playsInline />
+              <div id="reader-venda-direct" className="h-full w-full" />
+              <ScannerControls session={scannerSession} />
+            </div>
             <button onClick={fecharScanner} className="mt-6 w-full bg-slate-800 text-white py-4 rounded-xl font-bold uppercase tracking-widest">Fechar</button>
           </div>
         </div>

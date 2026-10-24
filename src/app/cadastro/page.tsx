@@ -6,6 +6,8 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { gerarThumb, thumbPathFromOriginal } from '../../lib/thumbUtils';
 import { playBeep } from '../../lib/sound';
+import { ScannerControls } from '../components/ScannerControls';
+import { startBarcodeScanner, type ScannerSession } from '../../lib/scanner';
 
 // --- UTILITÁRIOS ---
 function blobToFile(blob: Blob, filename: string) {
@@ -83,9 +85,9 @@ function CadastroPageInner() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // ✅ scanner robusto (igual dashboard)
-  const scannerRef = useRef<any>(null);
-  const zxingRef = useRef<{ reset: () => void } | null>(null);
+  // Scanner (helper compartilhado em src/lib/scanner.ts)
+  const sessionRef = useRef<ScannerSession | null>(null);
+  const [scannerSession, setScannerSession] = useState<ScannerSession | null>(null);
 
   // --- CARREGAMENTO INICIAL ---
   useEffect(() => {
@@ -237,203 +239,51 @@ function CadastroPageInner() {
     }
     if (videoRef.current) (videoRef.current as any).srcObject = null;
 
-    // fecha scanner html5-qrcode
-    try {
-      const s = scannerRef.current;
-      if (s) {
-        try {
-          const maybe = s.stop?.();
-          if (maybe && typeof maybe.then === 'function') await maybe.catch(() => {});
-        } catch {}
-        try {
-          s.clear?.();
-        } catch {}
-      }
-    } catch {}
-
-    // fecha fallback ZXing
-    if (zxingRef.current) {
-      try {
-        zxingRef.current.reset();
-      } catch {}
-      zxingRef.current = null;
-    }
+    // fecha scanner (helper compartilhado)
+    const s = sessionRef.current;
+    sessionRef.current = null;
+    setScannerSession(null);
+    if (s) await s.stop();
 
     setCameraAtiva(null);
   };
 
-  // --- SCANNER (EAN) ROBUSTO (igual dashboard) ---
+  // --- SCANNER (EAN) via helper compartilhado ---
   useEffect(() => {
     if (cameraAtiva?.tipo !== 'ean') return;
-
-    const elementId = 'reader-cadastro-direct';
     let cancelled = false;
 
-    const stopAndClear = async (s: any) => {
-      if (!s) return;
-      try {
-        const maybe = s.stop?.();
-        if (maybe && typeof maybe.then === 'function') {
-          await maybe.catch(() => {});
-        }
-      } catch {}
-      try {
-        s.clear?.();
-      } catch {}
-    };
-
-    const start = async () => {
+    (async () => {
       await new Promise((r) => setTimeout(r, 150));
       if (cancelled) return;
-
-      const el = document.getElementById(elementId);
-      if (!el) return;
-
-      // limpa e mostra html5-qrcode container
-      el.innerHTML = '';
-      el.classList.remove('hidden');
-
-      // prepara video do zxing
-      const zxingVideo = document.getElementById('zxing-video-cadastro') as HTMLVideoElement | null;
-      if (zxingVideo) zxingVideo.classList.add('hidden');
-
-      await stopAndClear(scannerRef.current);
-      if (zxingRef.current) {
-        try {
-          zxingRef.current.reset();
-        } catch {}
-        zxingRef.current = null;
-      }
-
-      const onFound = (text: string) => {
-        const cleaned = String(text || '').trim();
-        if (!cleaned) return;
-        playBeep();
-
-        if (cameraAtiva?.idxTam !== undefined) {
-          setTamanhos((prev) => {
-            const n = [...prev];
-            if (n[cameraAtiva.idxTam!]) n[cameraAtiva.idxTam!].ean = cleaned;
-            return n;
-          });
-        }
-
-        fecharCamera();
-      };
-
-      // Detecta suporte a BarcodeDetector (fundamental para 1D no desktop)
-      const hasBarcodeDetector = typeof (window as any).BarcodeDetector !== 'undefined';
-
-      // ZXing fallback (desktop sem BarcodeDetector)
-      if (!hasBarcodeDetector) {
-        try {
-          const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
-            import('@zxing/browser'),
-            import('@zxing/library'),
-          ]);
-
-          if (cancelled) return;
-
-          if (!zxingVideo) {
-            console.error('ZXing video element não encontrado.');
-            return;
+      const el = document.getElementById('reader-cadastro-direct');
+      if (el) el.innerHTML = '';
+      const session = await startBarcodeScanner({
+        containerId: 'reader-cadastro-direct',
+        videoFallbackId: 'zxing-video-cadastro',
+        onDetect: (text) => {
+          playBeep();
+          if (cameraAtiva?.idxTam !== undefined) {
+            setTamanhos((prev) => {
+              const n = [...prev];
+              if (n[cameraAtiva.idxTam!]) n[cameraAtiva.idxTam!].ean = text;
+              return n;
+            });
           }
-
-          // esconde html5-qrcode e mostra o video
-          el.classList.add('hidden');
-          zxingVideo.classList.remove('hidden');
-
-          const hints = new Map();
-          hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]);
-
-          const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 200 });
-
-          zxingRef.current = {
-            reset: () => {
-              try {
-                (reader as any).stopContinuousDecode?.();
-              } catch {}
-              try {
-                (reader as any).stopAsyncDecode?.();
-              } catch {}
-              try {
-                const stream = (zxingVideo as any)?.srcObject as MediaStream | null;
-                stream?.getTracks?.().forEach((t) => t.stop());
-                (zxingVideo as any).srcObject = null;
-              } catch {}
-            },
-          };
-
-          const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-          const preferred = devices.find((d: any) => /back|rear|traseira|environment/i.test(d.label)) ?? devices[0];
-
-          reader.decodeFromVideoDevice(preferred?.deviceId, zxingVideo, (result) => {
-            if (cancelled) return;
-            const text = result?.getText?.() ? result.getText() : '';
-            if (text) onFound(text);
-          });
-
-          return;
-        } catch (err) {
-          console.error('Falha ao iniciar ZXing fallback:', err);
-        }
-      }
-
-      // html5-qrcode (iPhone / browsers com BarcodeDetector)
-      let Html5Qrcode: any;
-      let Formats: any;
-
-      try {
-        const mod = await import('html5-qrcode');
-        if (cancelled) return;
-        Html5Qrcode = mod.Html5Qrcode;
-        Formats = mod.Html5QrcodeSupportedFormats;
-      } catch (err) {
-        console.error('Falha ao carregar html5-qrcode:', err);
-        alert('Erro ao iniciar câmera.');
-        return;
-      }
-
-      const scanner = new Html5Qrcode(elementId);
-      scannerRef.current = scanner;
-
-      const config: any = {
-        fps: 9,
-        qrbox: { width: 280, height: 120 },
-        aspectRatio: 1.777,
-        disableFlip: true,
-        formatsToSupport: [Formats.EAN_13, Formats.EAN_8],
-        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-        videoConstraints: { width: { ideal: 1280 }, height: { ideal: 720 } },
-      };
-
-      try {
-        const cameras = await Html5Qrcode.getCameras();
-        const preferred = cameras.find((c: any) => /back|rear|traseira|environment/i.test(c.label)) ?? cameras[0];
-
-        await scanner.start({ deviceId: { exact: preferred.id } }, config, onFound, () => {});
-      } catch (err) {
-        console.error('Falha ao iniciar html5-qrcode:', err);
-        try {
-          await scanner.start({ facingMode: 'environment' }, config, onFound, () => {});
-        } catch (err2) {
-          console.error('Fallback html5-qrcode falhou:', err2);
-          alert('Erro ao iniciar câmera.');
-        }
-      }
-    };
-
-    start();
+          fecharCamera();
+        },
+      });
+      if (cancelled) { session.stop(); return; }
+      sessionRef.current = session;
+      setScannerSession(session);
+    })();
 
     return () => {
       cancelled = true;
-      stopAndClear(scannerRef.current);
-      if (zxingRef.current) {
-        try {
-          zxingRef.current.reset();
-        } catch {}
-        zxingRef.current = null;
-      }
+      const s = sessionRef.current;
+      sessionRef.current = null;
+      setScannerSession(null);
+      if (s) s.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraAtiva?.tipo, cameraAtiva?.idxTam]);
@@ -970,6 +820,8 @@ function CadastroPageInner() {
                 <video id="zxing-video-cadastro" className="h-64 w-full object-cover hidden" muted playsInline />
                 {/* html5-qrcode */}
                 <div id="reader-cadastro-direct" className="h-64 w-full" />
+                {/* Controles: lente ativa, lanterna, mira, tap-to-focus, dica */}
+                <ScannerControls session={scannerSession} />
               </div>
 
               <div className="mt-3">
