@@ -871,10 +871,10 @@ export default function Dashboard() {
                   id={`produto-${produto.id}`}
                   onClick={() => saveReturnState(produto.id)}
                   onMouseDown={() => saveReturnState(produto.id)}
-                  className="bg-slate-900 rounded flex overflow-hidden border border-slate-800/50 min-h-[108px] shadow-xl group active:scale-[0.98] transition-all"
+                  className="bg-slate-900 rounded flex overflow-hidden border border-slate-800/50 min-h-[132px] shadow-xl group active:scale-[0.98] transition-all"
                 >
                   <div
-                    className="w-28 bg-slate-950 relative border-r border-slate-800 flex-shrink-0 cursor-zoom-in"
+                    className="w-32 bg-slate-950 relative border-r border-slate-800 flex-shrink-0 cursor-zoom-in"
                     onClick={(e) => {
                       if (!urlAssinada) return;
                       e.preventDefault();
@@ -896,16 +896,17 @@ export default function Dashboard() {
                           const target = e.target as HTMLImageElement;
                           target.style.display = 'none';
                           target.parentElement!.innerHTML =
-                            '<div class="w-full h-full flex items-center justify-center text-slate-800 text-[10px] font-black uppercase">Erro Foto</div>';
+                            '<div class="w-full h-full flex items-center justify-center text-slate-500 text-xs font-black uppercase">Erro Foto</div>';
                         }}
                       />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-slate-800 text-[10px] font-black uppercase">
+                      <div className="w-full h-full flex items-center justify-center text-slate-500 text-xs font-black uppercase">
                         {produto.foto_url ? 'Carregando...' : 'Sem Foto'}
                       </div>
                     )}
+                    {/* Badge "X un" com texto maior e melhor contraste */}
                     <div
-                      className={`absolute bottom-1.5 left-1.5 px-2 py-0.5 rounded-md font-black text-[10px] shadow-2xl ${
+                      className={`absolute bottom-2 left-2 px-2.5 py-1 rounded-md font-black text-xs shadow-2xl ${
                         total > 0 ? 'bg-emerald-500 text-white' : 'bg-red-600 text-white'
                       }`}
                     >
@@ -913,38 +914,38 @@ export default function Dashboard() {
                     </div>
                   </div>
 
-                  <div className="flex-1 p-3 flex flex-col justify-between min-w-0 gap-1">
-                    {/* Linha 1: título + preço */}
+                  <div className="flex-1 p-3.5 flex flex-col justify-between min-w-0 gap-1.5">
+                    {/* Linha 1: título + preço (ambos maiores e mais contraste) */}
                     <div className="flex items-start justify-between gap-2 min-w-0">
-                      <h2 className="font-bold text-slate-100 text-[12px] uppercase line-clamp-2 leading-tight flex-1 min-w-0">{produto.descricao}</h2>
-                      <span className="text-sm font-black text-white shrink-0 leading-tight">{formatBRL(produto.preco_venda)}</span>
+                      <h2 className="font-black text-white text-[15px] uppercase line-clamp-2 leading-tight flex-1 min-w-0">{produto.descricao}</h2>
+                      <span className="text-lg font-black text-white shrink-0 leading-tight tabular-nums">{formatBRL(produto.preco_venda)}</span>
                     </div>
 
                     {/* Linha 2: swatch + fornecedor · cor */}
-                    <div className="flex items-center gap-1.5 min-w-0">
+                    <div className="flex items-center gap-2 min-w-0">
                       <span
-                        className="w-2.5 h-2.5 rounded-full border border-white/10 shadow shrink-0"
+                        className="w-3.5 h-3.5 rounded-full border border-white/20 shadow shrink-0"
                         style={swatch.style}
                         aria-label={`Cor: ${swatch.aria || 'não informado'}`}
                         title={produto.cor || ''}
                       />
-                      <p className="text-[9px] text-slate-500 font-bold uppercase tracking-wide truncate">
+                      <p className="text-xs text-slate-300 font-black tracking-wide truncate">
                         {produto.fornecedor || 'Geral'} • {produto.cor}
                       </p>
                     </div>
 
-                    {/* Linha 3: tamanhos (compacto) */}
-                    <div className="flex flex-wrap gap-1">
+                    {/* Linha 3: tamanhos (fonte maior, zerados visíveis) */}
+                    <div className="flex flex-wrap gap-1.5">
                       {produto.estoque?.map((item: any, i: number) => (
                         <span
                           key={i}
-                          className={`text-[9px] px-1.5 py-0.5 rounded-md font-black border leading-none ${
+                          className={`text-xs px-2 py-0.5 rounded-md font-black border leading-tight ${
                             item.quantidade > 0
-                              ? 'bg-slate-800 border-slate-700 text-slate-300'
-                              : 'bg-transparent border-slate-800 text-slate-700 border-dashed'
+                              ? 'bg-slate-800 border-slate-600 text-slate-100'
+                              : 'bg-transparent border-slate-700 text-slate-400 border-dashed'
                           }`}
                         >
-                          {item.tamanho?.nome}{item.quantidade > 0 && `·${item.quantidade}`}
+                          {item.tamanho?.nome}{item.quantidade > 0 && ` · ${item.quantidade}`}
                         </span>
                       ))}
                     </div>
