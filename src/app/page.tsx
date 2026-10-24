@@ -918,36 +918,36 @@ export default function Dashboard() {
                     {/* Linha 1: título — largura cheia pra não ser cortado */}
                     <h2 className="font-black text-white text-[15px] uppercase line-clamp-2 leading-tight">{produto.descricao}</h2>
 
-                    {/* Linha 2: swatch + fornecedor · cor (esquerda) + preço (direita) */}
-                    <div className="flex items-center justify-between gap-2 min-w-0">
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
-                        <span
-                          className="w-3.5 h-3.5 rounded-full border border-white/20 shadow shrink-0"
-                          style={swatch.style}
-                          aria-label={`Cor: ${swatch.aria || 'não informado'}`}
-                          title={produto.cor || ''}
-                        />
-                        <p className="text-xs text-slate-300 font-black tracking-wide truncate">
-                          {produto.fornecedor || 'Geral'} • {produto.cor}
-                        </p>
-                      </div>
-                      <span className="text-lg font-black text-white shrink-0 leading-tight tabular-nums">{formatBRL(produto.preco_venda)}</span>
+                    {/* Linha 2: swatch + fornecedor · cor — linha inteira só pra isso */}
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className="w-3.5 h-3.5 rounded-full border border-white/20 shadow shrink-0"
+                        style={swatch.style}
+                        aria-label={`Cor: ${swatch.aria || 'não informado'}`}
+                        title={produto.cor || ''}
+                      />
+                      <p className="text-xs text-slate-300 font-black tracking-wide truncate">
+                        {produto.fornecedor || 'Geral'} • {produto.cor}
+                      </p>
                     </div>
 
-                    {/* Linha 3: tamanhos (fonte maior, zerados visíveis) */}
-                    <div className="flex flex-wrap gap-1.5">
-                      {produto.estoque?.map((item: any, i: number) => (
-                        <span
-                          key={i}
-                          className={`text-xs px-2 py-0.5 rounded-md font-black border leading-tight ${
-                            item.quantidade > 0
-                              ? 'bg-slate-800 border-slate-600 text-slate-100'
-                              : 'bg-transparent border-slate-700 text-slate-400 border-dashed'
-                          }`}
-                        >
-                          {item.tamanho?.nome}{item.quantidade > 0 && ` · ${item.quantidade}`}
-                        </span>
-                      ))}
+                    {/* Linha 3: tamanhos (esquerda) + preço (direita) */}
+                    <div className="flex items-center justify-between gap-2 min-w-0">
+                      <div className="flex flex-wrap gap-1.5 flex-1 min-w-0">
+                        {produto.estoque?.map((item: any, i: number) => (
+                          <span
+                            key={i}
+                            className={`text-xs px-2 py-0.5 rounded-md font-black border leading-tight ${
+                              item.quantidade > 0
+                                ? 'bg-slate-800 border-slate-600 text-slate-100'
+                                : 'bg-transparent border-slate-700 text-slate-400 border-dashed'
+                            }`}
+                          >
+                            {item.tamanho?.nome}{item.quantidade > 0 && ` · ${item.quantidade}`}
+                          </span>
+                        ))}
+                      </div>
+                      <span className="text-lg font-black text-white shrink-0 leading-tight tabular-nums">{formatBRL(produto.preco_venda)}</span>
                     </div>
                   </div>
                 </Link>
