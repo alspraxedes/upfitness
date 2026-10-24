@@ -159,6 +159,23 @@ export async function startBarcodeScanner(opts: ScannerOpts): Promise<ScannerSes
     stop: async () => { /* preenchido abaixo */ },
   };
 
+  // Flag anti-duplicata: o html5-qrcode/ZXing seguem lendo o vídeo e podem
+  // chamar o callback várias vezes em sequência com o mesmo (ou novos)
+  // códigos. Garantimos que `onDetect` só é chamado UMA VEZ e paramos a
+  // sessão em seguida — senão o estado da página fica sendo sobrescrito e
+  // o usuário não consegue limpar/editar o campo depois.
+  let detected = false;
+  const handleDetect = (text: string) => {
+    if (detected) return;
+    const cleaned = String(text || '').trim();
+    if (!cleaned) return;
+    detected = true;
+    try { onDetect(cleaned); } catch (err) { console.error(err); }
+    // Para a câmera fora da pilha de chamadas atual para não entrar em corrida
+    // com os callbacks internos dos leitores.
+    queueMicrotask(() => { void session.stop(); });
+  };
+
   // --- Caminho ZXing (desktop sem BarcodeDetector) ---------------------
   if (!hasBarcodeDetector) {
     try {
@@ -184,7 +201,7 @@ export async function startBarcodeScanner(opts: ScannerOpts): Promise<ScannerSes
 
       await reader.decodeFromVideoDevice(preferred?.id ?? undefined, zxingVideo, (result) => {
         const text = result?.getText?.() ? result.getText() : '';
-        if (text) onDetect(String(text).trim());
+        if (text) handleDetect(text);
       });
 
       // ZXing não oferece controle de torch/focus de forma portátil — expomos como no-op.
@@ -248,8 +265,7 @@ export async function startBarcodeScanner(opts: ScannerOpts): Promise<ScannerSes
   };
 
   const decoded = (text: string) => {
-    const cleaned = String(text || '').trim();
-    if (cleaned) onDetect(cleaned);
+    handleDetect(text);
   };
 
   try {
