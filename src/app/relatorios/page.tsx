@@ -221,7 +221,10 @@ function RelatoriosInner() {
   });
   const [invPorFornecedor, setInvPorFornecedor] = useState<FornecedorInventario[]>([]);
   const [invMaisAntigos, setInvMaisAntigos] = useState<ProdutoInventario[]>([]);
+  const [invMaisAntigosPorFornecedor, setInvMaisAntigosPorFornecedor] = useState<Record<string, ProdutoInventario[]>>({});
   const [invDescontinuados, setInvDescontinuados] = useState<ProdutoInventario[]>([]);
+  // Linha de fornecedor expandida no card "Dinheiro preso por fornecedor"
+  const [invFornecedorExpandido, setInvFornecedorExpandido] = useState<string | null>(null);
   const [loadingInv, setLoadingInv] = useState(true);
 
   // ABAS (Vendas | Inventário)
@@ -643,13 +646,27 @@ function RelatoriosInner() {
       const porFornArr = Array.from(porForn.values()).sort((a, b) => b.valorCusto - a.valorCusto);
       setInvPorFornecedor(porFornArr);
 
-      // Mais antigos ainda em estoque (top 10 — já vem ordenado ASC por created_at)
+      // Mais antigos ainda em estoque (top 100 — já vem ordenado ASC por created_at)
       // Guarda a lista completa (já ordenada por created_at ASC); o slider
       // na UI decide quantos exibir, até o teto de 100.
-      const antigos = produtos
-        .filter((p) => p.qtd > 0 && !p.descontinuado)
-        .slice(0, 100);
-      setInvMaisAntigos(antigos);
+      // Elegíveis: ordenados primeiro pela idade (created_at ASC — mais antigos
+       // primeiro) e, dentro da mesma data, pelo custo total preso (DESC — mais
+       // dinheiro preso primeiro).
+       const elegiveis = produtos
+         .filter((p) => p.qtd > 0 && !p.descontinuado)
+         .sort((a, b) => {
+           const porData = a.created_at.localeCompare(b.created_at);
+           if (porData !== 0) return porData;
+           return (b.custo_unit * b.qtd) - (a.custo_unit * a.qtd);
+         });
+      setInvMaisAntigos(elegiveis.slice(0, 100));
+      // Mais antigos por fornecedor: top 10 de cada (também ASC por created_at)
+      const porFornTop: Record<string, ProdutoInventario[]> = {};
+      for (const p of elegiveis) {
+        const arr = porFornTop[p.fornecedor] ?? (porFornTop[p.fornecedor] = []);
+        if (arr.length < 10) arr.push(p);
+      }
+      setInvMaisAntigosPorFornecedor(porFornTop);
       // Descontinuados ordenados por maior valor preso (custo total) primeiro
       descontinuadosLista.sort((a, b) => (b.custo_unit * b.qtd) - (a.custo_unit * a.qtd));
       setInvDescontinuados(descontinuadosLista);
@@ -659,6 +676,7 @@ function RelatoriosInner() {
       setInvKpis({ pecas: 0, skusComEstoque: 0, valorCusto: 0, valorVenda: 0, lucroPotencial: 0, skusIncompletos: 0, descontinuadosComEstoque: 0, pecasDescontinuadas: 0 });
       setInvPorFornecedor([]);
       setInvMaisAntigos([]);
+      setInvMaisAntigosPorFornecedor({});
       setInvDescontinuados([]);
     } finally {
       setLoadingInv(false);
@@ -1025,19 +1043,87 @@ function RelatoriosInner() {
               <div className="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-800/60">
                 {invPorFornecedor.slice(0, 5).map((f) => {
                   const pct = invKpis.valorCusto > 0 ? (f.valorCusto / invKpis.valorCusto) * 100 : 0;
+                  const aberto = invFornecedorExpandido === f.fornecedor;
+                  const antigosDoForn = invMaisAntigosPorFornecedor[f.fornecedor] ?? [];
                   return (
-                    <div key={f.fornecedor} className="px-3 py-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-black text-white truncate flex-1 min-w-0">{f.fornecedor}</span>
-                        <span className="text-xs font-black text-white shrink-0">{formatBRL(f.valorCusto)}</span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2 text-[10px] font-bold text-slate-500 uppercase mt-0.5">
-                        <span>{f.skus} SKUs · {f.qtd} peças</span>
-                        <span className="text-amber-400">lucro {formatBRL(f.lucro)}</span>
-                      </div>
-                      <div className="mt-1.5 h-1 bg-slate-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-amber-500 to-pink-500" style={{ width: `${Math.min(100, pct)}%` }} />
-                      </div>
+                    <div key={f.fornecedor}>
+                      <button
+                        type="button"
+                        onClick={() => setInvFornecedorExpandido(aberto ? null : f.fornecedor)}
+                        className={`w-full text-left px-3 py-2.5 transition active:scale-[0.995] ${aberto ? 'bg-amber-950/20' : 'hover:bg-slate-900/60'}`}
+                        aria-expanded={aberto}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-black text-white truncate flex-1 min-w-0 flex items-center gap-1.5">
+                            <span className={`text-[10px] text-slate-500 transition-transform ${aberto ? 'rotate-90' : ''}`}>▶</span>
+                            {f.fornecedor}
+                          </span>
+                          <span className="text-xs font-black text-white shrink-0">{formatBRL(f.valorCusto)}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 text-[10px] font-bold text-slate-500 uppercase mt-0.5 pl-4">
+                          <span>{f.skus} SKUs · {f.qtd} peças</span>
+                          <span className="text-amber-400">lucro {formatBRL(f.lucro)}</span>
+                        </div>
+                        <div className="mt-1.5 h-1 bg-slate-800 rounded-full overflow-hidden ml-4">
+                          <div className="h-full bg-gradient-to-r from-amber-500 to-pink-500" style={{ width: `${Math.min(100, pct)}%` }} />
+                        </div>
+                      </button>
+
+                      {/* Expandido: top 10 itens mais antigos do fornecedor */}
+                      {aberto && (
+                        <div className="bg-slate-950/60 border-t border-slate-800/60">
+                          <div className="px-3 pt-2 pb-1 text-[9px] font-black uppercase tracking-widest text-amber-400">
+                            Mais antigos deste fornecedor ({Math.min(10, antigosDoForn.length)})
+                          </div>
+                          {antigosDoForn.length === 0 ? (
+                            <div className="px-3 pb-3 text-[10px] font-bold text-slate-500 uppercase">Sem itens elegíveis</div>
+                          ) : (
+                            <div className="divide-y divide-slate-800/60">
+                              {antigosDoForn.map((p) => {
+                                const dias = Math.floor((Date.now() - new Date(p.created_at).getTime()) / (1000 * 60 * 60 * 24));
+                                const thumbUrl = thumbUrlFromFotoUrl(p.foto_url || '');
+                                const thumbPath = extractPath(thumbUrl);
+                                const custoTotal = p.custo_unit * p.qtd;
+                                const idadeTom =
+                                  dias >= 180 ? 'bg-red-950/50 text-red-300 border-red-900/60' :
+                                  dias >= 90  ? 'bg-amber-950/50 text-amber-300 border-amber-900/60' :
+                                                'bg-slate-800 text-slate-300 border-slate-700';
+                                return (
+                                  <Link
+                                    key={p.id}
+                                    href={itemHrefFromRelatorios(p.id, dashQS)}
+                                    className="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-900/60 active:scale-[0.995] transition"
+                                  >
+                                    <div className="shrink-0 w-10 h-10 rounded-lg overflow-hidden bg-slate-900 border border-slate-800 relative">
+                                      {thumbPath ? (
+                                        <Image src={supabase.storage.from('produtos').getPublicUrl(thumbPath).data.publicUrl} alt="" fill sizes="40px" className="object-cover" unoptimized />
+                                      ) : (
+                                        <div className="w-full h-full flex items-center justify-center text-slate-700 text-xs">📦</div>
+                                      )}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-1.5 min-w-0">
+                                        <span className="text-xs font-black text-white truncate flex-1 min-w-0">{p.descricao}</span>
+                                        <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded border shrink-0 ${idadeTom}`} title={`há ${dias} dias no sistema`}>
+                                          {dias}d
+                                        </span>
+                                      </div>
+                                      {p.cor && (
+                                        <p className="text-[10px] font-bold text-slate-500 uppercase truncate mt-0.5">{p.cor}</p>
+                                      )}
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                      <p className="text-xs font-black text-white leading-tight">{p.qtd} un</p>
+                                      <p className="text-[9px] font-bold text-slate-500 uppercase leading-tight mt-0.5">preso {formatBRL(custoTotal)}</p>
+                                      {p.preco_venda > 0 && <p className="text-[9px] font-bold text-amber-400 uppercase leading-tight">venda {formatBRL(p.preco_venda)}</p>}
+                                    </div>
+                                  </Link>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
